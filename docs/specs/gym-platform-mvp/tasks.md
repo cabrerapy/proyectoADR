@@ -12,6 +12,7 @@ Cada tarea indica objetivo, dependencias, módulos esperados, finalización/prue
 |---|---|---|---|
 | TASK-001 | COMPLETADA | 2026-08-02 | `npm ci --offline` instaló 357 paquetes desde `package-lock.json` y auditó 359 sin vulnerabilidades; `npm run check` validó formato (26 archivos), secretos (26 archivos), lint, typecheck y pruebas disponibles; `npm run build` compiló Next.js correctamente. |
 | TASK-002 | COMPLETADA | 2026-08-02 | `npm ci --offline` instaló 362 paquetes y auditó 369 sin vulnerabilidades; `npm run check` validó formato/secretos (42 archivos), límites sin ciclos (5 workspaces), lint, typecheck estricto de web y cinco paquetes, y pruebas disponibles; `npm run build` compiló correctamente. |
+| TASK-003 | COMPLETADA | 2026-08-02 | La prueba específica validó App Router, Next.js 16.2.12, Tailwind CSS y herencia de TypeScript estricto; `npm run check` pasó formato/secretos (43 archivos), límites, lint, typecheck y 1 prueba; `npm run build` compiló; verificación local a 360 px confirmó cero desbordamiento horizontal y cero errores de consola. |
 
 ## Fase 1. Fundación del repositorio
 
