@@ -2,6 +2,26 @@
 
 :root {
   color-scheme: light;
+  --gym-color-canvas: #f7f5ef;
+  --gym-color-surface: #ffffff;
+  --gym-color-ink: #17211b;
+  --gym-color-muted: #45544b;
+  --gym-color-brand-700: #1f5d46;
+  --gym-color-brand-900: #12372a;
+  --gym-color-accent: #e2b93b;
+  --gym-color-focus: #005fcc;
+  --gym-font-sans: Arial, Helvetica, sans-serif;
+}
+
+@theme inline {
+  --color-canvas: var(--gym-color-canvas);
+  --color-surface: var(--gym-color-surface);
+  --color-ink: var(--gym-color-ink);
+  --color-muted: var(--gym-color-muted);
+  --color-brand-700: var(--gym-color-brand-700);
+  --color-brand-900: var(--gym-color-brand-900);
+  --color-accent: var(--gym-color-accent);
+  --font-sans: var(--gym-font-sans);
 }
 
 * {
@@ -10,7 +30,29 @@
 
 body {
   margin: 0;
-  background: #f8fafc;
-  color: #0f172a;
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--gym-color-canvas);
+  color: var(--gym-color-ink);
+  font-family: var(--gym-font-sans);
+}
+
+:focus-visible {
+  outline: 3px solid var(--gym-color-focus);
+  outline-offset: 3px;
+}
+
+.skip-link {
+  position: fixed;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 50;
+  padding: 0.75rem 1rem;
+  border-radius: 0.5rem;
+  background: var(--gym-color-surface);
+  color: var(--gym-color-ink);
+  font-weight: 700;
+  transform: translateY(-200%);
+}
+
+.skip-link:focus {
+  transform: translateY(0);
 }
