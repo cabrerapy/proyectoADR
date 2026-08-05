@@ -24,7 +24,18 @@ test("TASK-008 pins a compatible OpenNext adapter", async () => {
     adapterPackage.peerDependencies.next,
     ">=15.5.18 <16 || >=16.2.6",
   );
-  assert.match(webPackage.scripts["build:serverless"], /open-next build/);
+  assert.equal(
+    webPackage.scripts.build,
+    "next build --webpack",
+  );
+  assert.equal(
+    webPackage.scripts["build:serverless"],
+    "node scripts/build-serverless.mjs",
+  );
+  assert.equal(
+    webPackage.scripts["build:serverless:direct"],
+    "open-next build",
+  );
 });
 
 test("TASK-008 uses standalone output without OpenNext persistence", async () => {
@@ -41,4 +52,28 @@ test("TASK-008 uses standalone output without OpenNext persistence", async () =>
   assert.match(nextConfig, /poweredByHeader: false/);
   assert.match(openNextConfig, /disableIncrementalCache: true/);
   assert.match(openNextConfig, /disableTagCache: true/);
+});
+
+test("TASK-008 confines the Windows OpenNext build to the repository", async () => {
+  const buildScript = await readFile(
+    path.join(webRoot, "scripts/build-serverless.mjs"),
+    "utf8",
+  );
+
+  assert.match(buildScript, /process\.platform !== "win32"/);
+  assert.match(buildScript, /process\.env\.npm_execpath/);
+  assert.match(buildScript, /spawnSync\(\s*process\.execPath/);
+  assert.match(buildScript, /execFileSync\("subst\.exe"/);
+  assert.match(buildScript, /path\.relative\(repositoryRoot, webRoot\)/);
+  assert.match(buildScript, /sharp@0\.32\.6/);
+  assert.match(buildScript, /npm_config_platform: "linux"/);
+  assert.match(buildScript, /npm_config_arch: "arm64"/);
+  assert.match(buildScript, /linux-arm64v8/);
+  assert.match(buildScript, /SHARP_IGNORE_GLOBAL_LIBVIPS/);
+  assert.match(buildScript, /--package-lock=false/);
+  assert.match(buildScript, /attempt <= 3/);
+  assert.match(buildScript, /tras tres intentos/);
+  assert.match(buildScript, /rmSync\(installRoot/);
+  assert.match(buildScript, /finally \{/);
+  assert.match(buildScript, /\[drive, "\/D"\]/);
 });

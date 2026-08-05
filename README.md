@@ -4,7 +4,7 @@ Plataforma web responsive para un gimnasio de cross training en Limpio, Paraguay
 
 ## Estado
 
-Especificación DynamoDB auditada. Next.js ya fue inicializado en `apps/web` y sus dependencias quedaron instaladas en una ejecución anterior. AWS CDK todavía no fue inicializado y no existen recursos AWS desplegados.
+Especificación DynamoDB auditada. La fundación del monorepo, Next.js y la infraestructura base con AWS CDK están implementadas hasta `TASK-008`, incluido el build serverless real de OpenNext. No existen recursos AWS desplegados.
 
 ## Decisiones base
 
@@ -37,4 +37,4 @@ docs/                     Especificaciones, arquitectura y ADR
 
 ## Próximo paso
 
-Revisar y aprobar la especificación. Tras la aprobación, comenzar por `TASK-001` y avanzar una tarea por vez conforme a `AGENTS.md`.
+Implementar `TASK-009` para configurar DynamoDB Local mediante Docker, siempre una tarea por vez conforme a `AGENTS.md`.

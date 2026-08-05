@@ -19,6 +19,7 @@ import {
   S3BucketOrigin,
 } from "aws-cdk-lib/aws-cloudfront-origins";
 import {
+  Architecture,
   Code,
   Function as LambdaFunction,
   FunctionUrlAuthType,
@@ -100,6 +101,7 @@ export class WebHosting extends Construct {
       this,
       "ImageOptimizationFunction",
       {
+        architecture: Architecture.ARM_64,
         code: Code.fromAsset(props.artifacts.imageOptimizationFunctionPath),
         description: `OpenNext image optimization (${environmentConfig.name})`,
         environment: {

@@ -80,6 +80,7 @@ describe("OpenNext web hosting", () => {
       Timeout: 30,
     });
     template.hasResourceProperties("AWS::Lambda::Function", {
+      Architectures: ["arm64"],
       Description: "OpenNext image optimization (development)",
       Environment: {
         Variables: Match.objectLike({

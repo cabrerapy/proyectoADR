@@ -4,8 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
-    "build:serverless": "open-next build",
+    "build": "next build --webpack",
+    "build:serverless": "node scripts/build-serverless.mjs",
+    "build:serverless:direct": "open-next build",
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
