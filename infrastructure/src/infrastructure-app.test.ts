@@ -1,5 +1,6 @@
 import { App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -7,6 +8,21 @@ import {
   resolveEnvironmentConfig,
 } from "./config/environment.js";
 import { createInfrastructure } from "./infrastructure-app.js";
+
+const webHostingArtifacts = {
+  imageOptimizationFunctionPath: path.resolve(
+    import.meta.dirname,
+    "../test-fixtures/open-next/image-optimization-function",
+  ),
+  serverFunctionPath: path.resolve(
+    import.meta.dirname,
+    "../test-fixtures/open-next/server-functions/default",
+  ),
+  staticAssetsPath: path.resolve(
+    import.meta.dirname,
+    "../test-fixtures/open-next/assets",
+  ),
+};
 
 describe("environment configuration", () => {
   it.each(deploymentEnvironmentNames)(
@@ -34,7 +50,7 @@ describe("CDK application", () => {
     "creates one environment-specific foundation stack for %s",
     (environment) => {
       const app = new App({ context: { environment } });
-      const application = createInfrastructure(app);
+      const application = createInfrastructure(app, { webHostingArtifacts });
       const template = Template.fromStack(application.stack).toJSON();
 
       expect(application.stack.stackName).toBe(
@@ -49,7 +65,9 @@ describe("CDK application", () => {
   );
 
   it("requires explicit environment context", () => {
-    expect(() => createInfrastructure(new App())).toThrow(
+    expect(() =>
+      createInfrastructure(new App(), { webHostingArtifacts }),
+    ).toThrow(
       'CDK context "environment" must be one of: local, development, production.',
     );
   });

@@ -1,5 +1,6 @@
 import { App } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { DeploymentEnvironmentName } from "../config/environment.js";
@@ -7,7 +8,24 @@ import { createInfrastructure } from "../infrastructure-app.js";
 
 const synthesize = (environment: DeploymentEnvironmentName) => {
   const app = new App({ context: { environment } });
-  return Template.fromStack(createInfrastructure(app).stack);
+  return Template.fromStack(
+    createInfrastructure(app, {
+      webHostingArtifacts: {
+        imageOptimizationFunctionPath: path.resolve(
+          import.meta.dirname,
+          "../../test-fixtures/open-next/image-optimization-function",
+        ),
+        serverFunctionPath: path.resolve(
+          import.meta.dirname,
+          "../../test-fixtures/open-next/server-functions/default",
+        ),
+        staticAssetsPath: path.resolve(
+          import.meta.dirname,
+          "../../test-fixtures/open-next/assets",
+        ),
+      },
+    }).stack,
+  );
 };
 
 describe("security foundation", () => {
@@ -68,7 +86,7 @@ describe("security foundation", () => {
     });
   });
 
-  it("gives the runtime role only write access to its exact log group", () => {
+  it("keeps runtime log access scoped to its exact log group", () => {
     const template = synthesize("development");
 
     template.hasResourceProperties("AWS::IAM::Role", {
@@ -84,13 +102,13 @@ describe("security foundation", () => {
     });
     template.hasResourceProperties("AWS::IAM::Policy", {
       PolicyDocument: {
-        Statement: [
+        Statement: Match.arrayWith([
           Match.objectLike({
             Action: ["logs:CreateLogStream", "logs:PutLogEvents"],
             Effect: "Allow",
             Resource: Match.objectLike({ "Fn::GetAtt": Match.anyValue() }),
           }),
-        ],
+        ]),
       },
       Roles: Match.anyValue(),
     });

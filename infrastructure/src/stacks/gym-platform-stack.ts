@@ -3,14 +3,18 @@ import type { Construct } from "constructs";
 
 import type { EnvironmentConfig } from "../config/environment.js";
 import { SecurityFoundation } from "../foundation/security-foundation.js";
+import type { WebHostingArtifacts } from "../hosting/web-hosting-artifacts.js";
+import { WebHosting } from "../hosting/web-hosting.js";
 
 export interface GymPlatformStackProps extends StackProps {
   readonly environmentConfig: EnvironmentConfig;
+  readonly webHostingArtifacts: WebHostingArtifacts;
 }
 
 export class GymPlatformStack extends Stack {
   readonly environmentConfig: EnvironmentConfig;
   readonly securityFoundation: SecurityFoundation;
+  readonly webHosting: WebHosting;
 
   constructor(
     scope: Construct,
@@ -29,5 +33,10 @@ export class GymPlatformStack extends Stack {
       "SecurityFoundation",
       { environmentConfig: props.environmentConfig },
     );
+    this.webHosting = new WebHosting(this, "WebHosting", {
+      artifacts: props.webHostingArtifacts,
+      environmentConfig: props.environmentConfig,
+      securityFoundation: this.securityFoundation,
+    });
   }
 }
