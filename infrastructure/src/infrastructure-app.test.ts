@@ -31,7 +31,7 @@ describe("environment configuration", () => {
 
 describe("CDK application", () => {
   it.each(deploymentEnvironmentNames)(
-    "creates one environment-specific empty stack for %s",
+    "creates one environment-specific foundation stack for %s",
     (environment) => {
       const app = new App({ context: { environment } });
       const application = createInfrastructure(app);
@@ -43,7 +43,7 @@ describe("CDK application", () => {
       expect(application.stack.terminationProtection).toBe(
         environment === "production",
       );
-      expect(template.Resources ?? {}).toEqual({});
+      expect(template.Resources).toBeDefined();
       expect(() => app.synth()).not.toThrow();
     },
   );

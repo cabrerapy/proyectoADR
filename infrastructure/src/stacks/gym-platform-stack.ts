@@ -2,6 +2,7 @@ import { Stack, type StackProps } from "aws-cdk-lib";
 import type { Construct } from "constructs";
 
 import type { EnvironmentConfig } from "../config/environment.js";
+import { SecurityFoundation } from "../foundation/security-foundation.js";
 
 export interface GymPlatformStackProps extends StackProps {
   readonly environmentConfig: EnvironmentConfig;
@@ -9,6 +10,7 @@ export interface GymPlatformStackProps extends StackProps {
 
 export class GymPlatformStack extends Stack {
   readonly environmentConfig: EnvironmentConfig;
+  readonly securityFoundation: SecurityFoundation;
 
   constructor(
     scope: Construct,
@@ -22,5 +24,10 @@ export class GymPlatformStack extends Stack {
     });
 
     this.environmentConfig = props.environmentConfig;
+    this.securityFoundation = new SecurityFoundation(
+      this,
+      "SecurityFoundation",
+      { environmentConfig: props.environmentConfig },
+    );
   }
 }

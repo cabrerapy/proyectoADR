@@ -9,6 +9,8 @@ export type DeploymentEnvironmentName =
 
 export interface EnvironmentConfig {
   readonly name: DeploymentEnvironmentName;
+  readonly logRetentionDays: 30 | 90;
+  readonly monthlyBudgetUsd: number;
   readonly stackName: string;
   readonly terminationProtection: boolean;
 }
@@ -16,16 +18,22 @@ export interface EnvironmentConfig {
 const environmentConfigs = {
   local: {
     name: "local",
+    logRetentionDays: 30,
+    monthlyBudgetUsd: 5,
     stackName: "gym-adr-platform-local",
     terminationProtection: false,
   },
   development: {
     name: "development",
+    logRetentionDays: 30,
+    monthlyBudgetUsd: 25,
     stackName: "gym-adr-platform-development",
     terminationProtection: false,
   },
   production: {
     name: "production",
+    logRetentionDays: 90,
+    monthlyBudgetUsd: 100,
     stackName: "gym-adr-platform-production",
     terminationProtection: true,
   },
