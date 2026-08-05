@@ -15,12 +15,20 @@
     "dev": "npm run dev --workspace @gym-adr/web",
     "build": "npm run build --workspace @gym-adr/web",
     "check:boundaries": "node scripts/check-workspace-boundaries.mjs",
+    "dynamodb:local:down": "node scripts/dynamodb-local/cli.mjs down",
+    "dynamodb:local:smoke": "node scripts/dynamodb-local/cli.mjs smoke",
+    "dynamodb:local:test": "node scripts/dynamodb-local/cli.mjs test",
+    "dynamodb:local:up": "node scripts/dynamodb-local/cli.mjs up",
     "format:check": "node scripts/check-format.mjs",
     "lint": "npm run lint --workspace @gym-adr/web",
     "security:secrets": "node scripts/check-secrets.mjs",
     "synth": "npm run synth --workspace @gym-adr/infrastructure",
+    "test:tooling": "node --test scripts/**/*.test.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "check": "npm run format:check && npm run security:secrets && npm run check:boundaries && npm run lint && npm run typecheck && npm test"
+    "check": "npm run format:check && npm run security:secrets && npm run check:boundaries && npm run lint && npm run typecheck && npm run test:tooling && npm test"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-dynamodb": "3.984.0"
   }
 }

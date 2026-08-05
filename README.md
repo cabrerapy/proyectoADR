@@ -20,6 +20,18 @@ Especificación DynamoDB auditada. La fundación del monorepo, Next.js y la infr
 - Plan: `docs/specs/gym-platform-mvp/tasks.md`
 - Decisiones: `docs/decisions/`
 
+## DynamoDB Local
+
+Requisito: Docker Desktop o un motor compatible con Docker Compose. El contenedor solo escucha en `127.0.0.1`, usa memoria efímera y no requiere credenciales AWS reales.
+
+```text
+npm run dynamodb:local:up
+npm run dynamodb:local:smoke
+npm run dynamodb:local:down
+```
+
+`npm run dynamodb:local:test` ejecuta el ciclo completo de arranque, readiness, transacción y limpieza. El puerto predeterminado es `8000`; para una ejecución puntual puede cambiarse con `DYNAMODB_LOCAL_PORT`.
+
 ## Estructura prevista
 
 ```text

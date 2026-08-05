@@ -1,0 +1,15 @@
+name: gym-adr-platform-local
+
+services:
+  dynamodb-local:
+    image: amazon/dynamodb-local:2.6.1
+    command: -jar DynamoDBLocal.jar -inMemory -sharedDb
+    ports:
+      - "127.0.0.1:${DYNAMODB_LOCAL_PORT:-8000}:8000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
