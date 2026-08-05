@@ -18,6 +18,7 @@
     "format:check": "node scripts/check-format.mjs",
     "lint": "npm run lint --workspace @gym-adr/web",
     "security:secrets": "node scripts/check-secrets.mjs",
+    "synth": "npm run synth --workspace @gym-adr/infrastructure",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "check": "npm run format:check && npm run security:secrets && npm run check:boundaries && npm run lint && npm run typecheck && npm test"

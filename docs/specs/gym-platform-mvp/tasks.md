@@ -15,6 +15,7 @@ Cada tarea indica objetivo, dependencias, módulos esperados, finalización/prue
 | TASK-003 | COMPLETADA | 2026-08-02 | La prueba específica validó App Router, Next.js 16.2.12, Tailwind CSS y herencia de TypeScript estricto; `npm run check` pasó formato/secretos (43 archivos), límites, lint, typecheck y 1 prueba; `npm run build` compiló; verificación local a 360 px confirmó cero desbordamiento horizontal y cero errores de consola. |
 | TASK-004 | COMPLETADA | 2026-08-02 | Layout, navegación y tokens accesibles implementados; Vitest aprobó 2 pruebas y Playwright aprobó 1 smoke sobre build a 360 px, verificando landmarks, salto al contenido por teclado, contraste ≥ 4,5:1 y ausencia de desbordamiento horizontal; `npm run check`, build y cierre limpio del servidor E2E pasaron. |
 | TASK-005 | COMPLETADA | 2026-08-04 | BFF base implementado con errores sanitizados, `correlationId` UUID, respuestas `no-store`, validación JSON y límite de 16 KiB; Vitest aprobó 11 pruebas de contratos y entradas inválidas; Playwright aprobó 2 smoke sobre build, incluido `/api/v1/health`; `npm run check` y build pasaron. |
+| TASK-006 | COMPLETADA | 2026-08-04 | CDK inicializado con ambiente tipado y obligatorio para `local`, `development` y `production`, stacks separados y protección de terminación en production; 12 pruebas, `npm run check`, build de infraestructura/web y synth de local/development sin credenciales pasaron; la CLI rechazó contexto de ambiente ausente y no se desplegó ni creó ningún recurso del proyecto. |
 
 ## Fase 1. Fundación del repositorio
 
