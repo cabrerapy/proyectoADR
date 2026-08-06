@@ -4,7 +4,7 @@ Plataforma web responsive para un gimnasio de cross training en Limpio, Paraguay
 
 ## Estado
 
-Especificación DynamoDB auditada. La fundación del monorepo, Next.js y la infraestructura base con AWS CDK están implementadas hasta `TASK-008`, incluido el build serverless real de OpenNext. No existen recursos AWS desplegados.
+Especificación DynamoDB auditada. La fundación del monorepo, Next.js y la infraestructura base con AWS CDK están implementadas hasta `TASK-008`, incluido el build serverless real de OpenNext. `TASK-009` está implementada parcialmente y pendiente del smoke con el motor de Docker activo. No existen recursos AWS desplegados.
 
 ## Decisiones base
 
@@ -45,8 +45,8 @@ docs/                     Especificaciones, arquitectura y ADR
 .github/workflows/        CI y despliegues protegidos
 ```
 
-`apps/web` ya existe. Los paquetes compartidos y `infrastructure/` se crearán únicamente al ejecutar sus tareas correspondientes.
+`apps/web`, los paquetes compartidos e `infrastructure/` ya existen conforme a las tareas completadas.
 
 ## Próximo paso
 
-Implementar `TASK-009` para configurar DynamoDB Local mediante Docker, siempre una tarea por vez conforme a `AGENTS.md`.
+Iniciar Docker Desktop y completar el smoke de `TASK-009` mediante `npm run dynamodb:local:test`, siempre una tarea por vez conforme a `AGENTS.md`.
