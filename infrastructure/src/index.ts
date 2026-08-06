@@ -10,6 +10,11 @@ export {
   type InfrastructureApplication,
 } from "./infrastructure-app.js";
 export {
+  DYNAMODB_INDEX_NAMES,
+  DynamoDbTable,
+  type DynamoDbTableProps,
+} from "./database/dynamodb-table.js";
+export {
   SecurityFoundation,
   type SecurityFoundationProps,
 } from "./foundation/security-foundation.js";

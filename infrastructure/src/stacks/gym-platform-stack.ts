@@ -2,6 +2,7 @@ import { Stack, type StackProps } from "aws-cdk-lib";
 import type { Construct } from "constructs";
 
 import type { EnvironmentConfig } from "../config/environment.js";
+import { DynamoDbTable } from "../database/dynamodb-table.js";
 import { SecurityFoundation } from "../foundation/security-foundation.js";
 import type { WebHostingArtifacts } from "../hosting/web-hosting-artifacts.js";
 import { WebHosting } from "../hosting/web-hosting.js";
@@ -12,6 +13,7 @@ export interface GymPlatformStackProps extends StackProps {
 }
 
 export class GymPlatformStack extends Stack {
+  readonly dynamoDbTable: DynamoDbTable;
   readonly environmentConfig: EnvironmentConfig;
   readonly securityFoundation: SecurityFoundation;
   readonly webHosting: WebHosting;
@@ -33,6 +35,10 @@ export class GymPlatformStack extends Stack {
       "SecurityFoundation",
       { environmentConfig: props.environmentConfig },
     );
+    this.dynamoDbTable = new DynamoDbTable(this, "DynamoDbTable", {
+      encryptionKey: this.securityFoundation.encryptionKey,
+      environmentConfig: props.environmentConfig,
+    });
     this.webHosting = new WebHosting(this, "WebHosting", {
       artifacts: props.webHostingArtifacts,
       environmentConfig: props.environmentConfig,

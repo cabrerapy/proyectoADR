@@ -129,10 +129,9 @@ describe("OpenNext web hosting", () => {
     });
   });
 
-  it("does not grant DynamoDB access before the data tasks", () => {
+  it("does not grant DynamoDB access to the hosting roles", () => {
     const template = synthesize().toJSON();
 
     expect(JSON.stringify(template)).not.toContain("dynamodb:");
-    expect(JSON.stringify(template)).not.toContain("AWS::DynamoDB::Table");
   });
 });
