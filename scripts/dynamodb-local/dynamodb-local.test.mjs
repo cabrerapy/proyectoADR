@@ -42,9 +42,17 @@ test("pins an isolated in-memory DynamoDB Local container", async () => {
   );
 
   assert.match(compose, /amazon\/dynamodb-local:2\.6\.1/);
+  assert.match(
+    compose,
+    /-Djava\.library\.path=\/home\/dynamodblocal\/DynamoDBLocal_lib/,
+  );
   assert.match(compose, /-inMemory -sharedDb/);
   assert.match(compose, /127\.0\.0\.1:/);
   assert.match(compose, /read_only: true/);
+  assert.match(
+    compose,
+    /\/tmp:rw,exec,nosuid,nodev,size=64m,mode=1777/,
+  );
   assert.match(compose, /no-new-privileges:true/);
   assert.match(compose, /cap_drop:\s*\n\s*- ALL/);
 });
