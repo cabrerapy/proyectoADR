@@ -4,7 +4,7 @@ Plataforma web responsive para un gimnasio de cross training en Limpio, Paraguay
 
 ## Estado
 
-Especificación DynamoDB auditada. La fundación del monorepo, Next.js, la infraestructura base con AWS CDK y la tabla única DynamoDB On-Demand están implementados hasta `TASK-011`, incluido el build serverless real de OpenNext. No existen recursos AWS desplegados.
+Especificación DynamoDB auditada. La fundación del monorepo, Next.js, la infraestructura base con AWS CDK, la tabla única DynamoDB On-Demand y el adaptador AWS SDK v3 están implementados hasta `TASK-012`, incluido el build serverless real de OpenNext. No existen recursos AWS desplegados.
 
 ## Decisiones base
 
@@ -49,4 +49,4 @@ docs/                     Especificaciones, arquitectura y ADR
 
 ## Próximo paso
 
-Implementar `TASK-012`, adaptador AWS SDK v3 y repositorio base, siempre una tarea por vez conforme a `AGENTS.md`.
+Implementar `TASK-013`, primitivas persistentes de idempotencia, siempre una tarea por vez conforme a `AGENTS.md`.

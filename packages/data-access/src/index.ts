@@ -1,6 +1,10 @@
 import type { DomainEntity } from "@gym-adr/domain";
 import type { EntityId } from "@gym-adr/shared";
 
+export * from "./base-repository";
+export * from "./dynamodb-adapter";
+export * from "./dynamodb-config";
+export * from "./dynamodb-errors";
 export * from "./model-codecs";
 export * from "./model-keys";
 export * from "./model-shards";
