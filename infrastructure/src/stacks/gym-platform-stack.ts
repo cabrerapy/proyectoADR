@@ -1,6 +1,7 @@
 import { Stack, type StackProps } from "aws-cdk-lib";
 import type { Construct } from "constructs";
 
+import { CognitoAuth } from "../auth/cognito-auth.js";
 import type { EnvironmentConfig } from "../config/environment.js";
 import { DynamoDbTable } from "../database/dynamodb-table.js";
 import { SecurityFoundation } from "../foundation/security-foundation.js";
@@ -13,6 +14,7 @@ export interface GymPlatformStackProps extends StackProps {
 }
 
 export class GymPlatformStack extends Stack {
+  readonly cognitoAuth: CognitoAuth;
   readonly dynamoDbTable: DynamoDbTable;
   readonly environmentConfig: EnvironmentConfig;
   readonly securityFoundation: SecurityFoundation;
@@ -43,6 +45,10 @@ export class GymPlatformStack extends Stack {
       artifacts: props.webHostingArtifacts,
       environmentConfig: props.environmentConfig,
       securityFoundation: this.securityFoundation,
+    });
+    this.cognitoAuth = new CognitoAuth(this, "CognitoAuth", {
+      environmentConfig: props.environmentConfig,
+      webBaseUrl: `https://${this.webHosting.distribution.distributionDomainName}`,
     });
   }
 }

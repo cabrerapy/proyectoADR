@@ -1,4 +1,12 @@
 export {
+  resolveAuthEnvironmentConfig,
+  type AuthEnvironmentConfig,
+} from "./auth/auth-environment.js";
+export {
+  CognitoAuth,
+  type CognitoAuthProps,
+} from "./auth/cognito-auth.js";
+export {
   deploymentEnvironmentNames,
   resolveEnvironmentConfig,
   type DeploymentEnvironmentName,
