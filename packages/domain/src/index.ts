@@ -5,5 +5,6 @@ export interface DomainEntity {
 }
 
 export * from "./financial";
+export * from "./operations";
 export * from "./scheduling";
 export * from "./user";

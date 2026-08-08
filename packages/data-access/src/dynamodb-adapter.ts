@@ -15,6 +15,7 @@ import {
   type TransactWriteCommandInput,
   type TransactWriteCommandOutput,
 } from "@aws-sdk/lib-dynamodb";
+import { ScanCommand } from "@aws-sdk/lib-dynamodb";
 
 import {
   createDynamoDbDocumentClient,
@@ -49,12 +50,30 @@ export interface DynamoDbSdkClient {
   send(command: TransactWriteCommand): Promise<TransactWriteCommandOutput>;
 }
 
+export const assertDynamoDbCommandAllowed = (command: unknown): void => {
+  if (
+    command instanceof ScanCommand ||
+    (typeof command === "object" &&
+      command !== null &&
+      command.constructor.name === "ScanCommand")
+  ) {
+    throw new Error(
+      "ScanCommand está prohibido en operaciones normales; use claves o índices aprobados.",
+    );
+  }
+};
+
+const allowed = <T>(command: T): T => {
+  assertDynamoDbCommandAllowed(command);
+  return command;
+};
+
 export class AwsDynamoDbAdapter implements DynamoDbDocumentPort {
   constructor(private readonly client: DynamoDbSdkClient) {}
 
   async batchGet(input: BatchGetCommandInput): Promise<BatchGetCommandOutput> {
     try {
-      return await this.client.send(new BatchGetCommand(input));
+      return await this.client.send(allowed(new BatchGetCommand(input)));
     } catch (error) {
       throw mapDynamoDbError(error);
     }
@@ -66,7 +85,7 @@ export class AwsDynamoDbAdapter implements DynamoDbDocumentPort {
 
   async get(input: GetCommandInput): Promise<GetCommandOutput> {
     try {
-      return await this.client.send(new GetCommand(input));
+      return await this.client.send(allowed(new GetCommand(input)));
     } catch (error) {
       throw mapDynamoDbError(error);
     }
@@ -74,7 +93,7 @@ export class AwsDynamoDbAdapter implements DynamoDbDocumentPort {
 
   async put(input: PutCommandInput): Promise<PutCommandOutput> {
     try {
-      return await this.client.send(new PutCommand(input));
+      return await this.client.send(allowed(new PutCommand(input)));
     } catch (error) {
       throw mapDynamoDbError(error);
     }
@@ -82,7 +101,7 @@ export class AwsDynamoDbAdapter implements DynamoDbDocumentPort {
 
   async query(input: QueryCommandInput): Promise<QueryCommandOutput> {
     try {
-      return await this.client.send(new QueryCommand(input));
+      return await this.client.send(allowed(new QueryCommand(input)));
     } catch (error) {
       throw mapDynamoDbError(error);
     }
@@ -92,7 +111,7 @@ export class AwsDynamoDbAdapter implements DynamoDbDocumentPort {
     input: TransactWriteCommandInput,
   ): Promise<TransactWriteCommandOutput> {
     try {
-      return await this.client.send(new TransactWriteCommand(input));
+      return await this.client.send(allowed(new TransactWriteCommand(input)));
     } catch (error) {
       throw mapDynamoDbError(error);
     }
