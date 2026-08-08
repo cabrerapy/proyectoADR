@@ -43,6 +43,10 @@ describe("DynamoDB table", () => {
       template.hasResourceProperties("AWS::DynamoDB::Table", {
         BillingMode: "PAY_PER_REQUEST",
         KeySchema: primaryKey,
+        TimeToLiveSpecification: {
+          AttributeName: "expiresAt",
+          Enabled: true,
+        },
         SSESpecification: {
           KMSMasterKeyId: {
             "Fn::GetAtt": [Match.stringLikeRegexp("EncryptionKey"), "Arn"],

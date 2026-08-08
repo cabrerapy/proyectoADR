@@ -3,8 +3,12 @@ import {
   type BatchGetCommandOutput,
   GetCommand,
   type GetCommandOutput,
+  PutCommand,
+  type PutCommandOutput,
   QueryCommand,
   type QueryCommandOutput,
+  TransactWriteCommand,
+  type TransactWriteCommandOutput,
 } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it } from "vitest";
 
@@ -13,7 +17,12 @@ import {
   type DynamoDbSdkClient,
 } from "./dynamodb-adapter";
 
-type AllowedCommand = BatchGetCommand | GetCommand | QueryCommand;
+type AllowedCommand =
+  | BatchGetCommand
+  | GetCommand
+  | PutCommand
+  | QueryCommand
+  | TransactWriteCommand;
 
 class FakeSdkClient implements DynamoDbSdkClient {
   readonly commands: AllowedCommand[] = [];
@@ -26,10 +35,18 @@ class FakeSdkClient implements DynamoDbSdkClient {
 
   send(command: BatchGetCommand): Promise<BatchGetCommandOutput>;
   send(command: GetCommand): Promise<GetCommandOutput>;
+  send(command: PutCommand): Promise<PutCommandOutput>;
   send(command: QueryCommand): Promise<QueryCommandOutput>;
+  send(command: TransactWriteCommand): Promise<TransactWriteCommandOutput>;
   async send(
     command: AllowedCommand,
-  ): Promise<BatchGetCommandOutput | GetCommandOutput | QueryCommandOutput> {
+  ): Promise<
+    | BatchGetCommandOutput
+    | GetCommandOutput
+    | PutCommandOutput
+    | QueryCommandOutput
+    | TransactWriteCommandOutput
+  > {
     this.commands.push(command);
     if (this.error !== undefined) {
       throw this.error;
@@ -64,10 +81,24 @@ describe("AwsDynamoDbAdapter", () => {
         },
       },
     });
+    await adapter.put({
+      Item: { PK: "IDEMPOTENCY#BOOKING#u1", SK: "REQUEST#request1" },
+      TableName: "gym-adr-platform-local",
+    });
+    await adapter.transactWrite({
+      TransactItems: [{
+        Put: {
+          Item: { PK: "EFFECT#1", SK: "METADATA" },
+          TableName: "gym-adr-platform-local",
+        },
+      }],
+    });
 
     expect(client.commands[0]).toBeInstanceOf(GetCommand);
     expect(client.commands[1]).toBeInstanceOf(QueryCommand);
     expect(client.commands[2]).toBeInstanceOf(BatchGetCommand);
+    expect(client.commands[3]).toBeInstanceOf(PutCommand);
+    expect(client.commands[4]).toBeInstanceOf(TransactWriteCommand);
     adapter.destroy();
     expect(client.destroyed).toBe(true);
   });

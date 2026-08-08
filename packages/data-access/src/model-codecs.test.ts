@@ -27,6 +27,7 @@ const FIXTURES: Readonly<Record<EntityType, unknown>> = {
   GymSettings: {},
   Idempotency: {
     dueDate: "2026-08-10",
+    kind: "REMINDER",
     membershipId: "membership-01",
     reminderType: "EXPIRY",
   },

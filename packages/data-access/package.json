@@ -10,7 +10,8 @@
     }
   },
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run --exclude src/**/*.integration.test.ts",
+    "test:integration": "vitest run src/idempotency-repository.integration.test.ts",
     "typecheck": "tsc --project tsconfig.json --noEmit"
   },
   "dependencies": {

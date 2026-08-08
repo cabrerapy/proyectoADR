@@ -53,6 +53,7 @@ export class DynamoDbTable extends Construct {
         : RemovalPolicy.DESTROY,
       sortKey: { name: "SK", type: AttributeType.STRING },
       tableName: `${projectName}-${environmentConfig.name}`,
+      timeToLiveAttribute: "expiresAt",
     });
 
     this.table.addGlobalSecondaryIndex({

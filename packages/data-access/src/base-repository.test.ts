@@ -10,7 +10,9 @@ const createPort = (): DynamoDbDocumentPort => ({
   batchGet: vi.fn(async () => ({ $metadata: metadata })),
   destroy: vi.fn(),
   get: vi.fn(async () => ({ $metadata: metadata })),
+  put: vi.fn(async () => ({ $metadata: metadata })),
   query: vi.fn(async () => ({ $metadata: metadata })),
+  transactWrite: vi.fn(async () => ({ $metadata: metadata })),
 });
 
 describe("BaseDynamoDbRepository", () => {

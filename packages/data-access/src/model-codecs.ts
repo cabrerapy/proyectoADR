@@ -20,11 +20,19 @@ export interface KeyInputByEntityType {
   readonly ClassType: { readonly classTypeId: string };
   readonly GalleryAsset: { readonly assetId: string };
   readonly GymSettings: Record<string, never>;
-  readonly Idempotency: {
-    readonly dueDate: string;
-    readonly membershipId: string;
-    readonly reminderType: string;
-  };
+  readonly Idempotency:
+    | {
+        readonly dueDate: string;
+        readonly kind: "REMINDER";
+        readonly membershipId: string;
+        readonly reminderType: string;
+      }
+    | {
+        readonly kind: "REQUEST";
+        readonly operation: string;
+        readonly requestKey: string;
+        readonly subjectId: string;
+      };
   readonly Lookup:
     | {
         readonly kind: "EMAIL";
@@ -213,11 +221,39 @@ export const KEY_CODECS: {
   ),
   Idempotency: codec(
     "Idempotency",
-    ({ dueDate, membershipId, reminderType }) =>
-      primaryKeys.reminderIdempotency(membershipId, reminderType, dueDate),
+    (input) => input.kind === "REMINDER"
+      ? primaryKeys.reminderIdempotency(
+          input.membershipId,
+          input.reminderType,
+          input.dueDate,
+        )
+      : primaryKeys.idempotency(
+          input.operation,
+          input.subjectId,
+          input.requestKey,
+        ),
     (key) => {
       const pk = parts(key.PK);
       const sk = parts(key.SK);
+      const operation = required(pk, 1);
+      const subjectId = required(pk, 2);
+      const requestKey = required(sk, 1);
+      if (
+        pk.length === 3 &&
+        pk[0] === "IDEMPOTENCY" &&
+        operation &&
+        subjectId &&
+        sk.length === 2 &&
+        sk[0] === "REQUEST" &&
+        requestKey
+      ) {
+        return {
+          kind: "REQUEST",
+          operation,
+          requestKey,
+          subjectId,
+        };
+      }
       const membershipId = required(pk, 2);
       const reminderType = required(sk, 1);
       const dueDate = required(sk, 2);
@@ -229,7 +265,7 @@ export const KEY_CODECS: {
         sk[0] === "REMINDER" &&
         reminderType &&
         dueDate
-        ? { dueDate, membershipId, reminderType }
+        ? { dueDate, kind: "REMINDER", membershipId, reminderType }
         : undefined;
     },
   ),

@@ -5,6 +5,7 @@ export * from "./base-repository";
 export * from "./dynamodb-adapter";
 export * from "./dynamodb-config";
 export * from "./dynamodb-errors";
+export * from "./idempotency-repository";
 export * from "./model-codecs";
 export * from "./model-keys";
 export * from "./model-shards";

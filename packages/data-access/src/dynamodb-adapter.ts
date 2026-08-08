@@ -5,9 +5,15 @@ import {
   GetCommand,
   type GetCommandInput,
   type GetCommandOutput,
+  PutCommand,
+  type PutCommandInput,
+  type PutCommandOutput,
   QueryCommand,
   type QueryCommandInput,
   type QueryCommandOutput,
+  TransactWriteCommand,
+  type TransactWriteCommandInput,
+  type TransactWriteCommandOutput,
 } from "@aws-sdk/lib-dynamodb";
 
 import {
@@ -27,14 +33,20 @@ export interface DynamoDbDocumentPort {
   ) => Promise<BatchGetCommandOutput>;
   readonly destroy: () => void;
   readonly get: (input: GetCommandInput) => Promise<GetCommandOutput>;
+  readonly put: (input: PutCommandInput) => Promise<PutCommandOutput>;
   readonly query: (input: QueryCommandInput) => Promise<QueryCommandOutput>;
+  readonly transactWrite: (
+    input: TransactWriteCommandInput,
+  ) => Promise<TransactWriteCommandOutput>;
 }
 
 export interface DynamoDbSdkClient {
   readonly destroy: () => void;
   send(command: BatchGetCommand): Promise<BatchGetCommandOutput>;
   send(command: GetCommand): Promise<GetCommandOutput>;
+  send(command: PutCommand): Promise<PutCommandOutput>;
   send(command: QueryCommand): Promise<QueryCommandOutput>;
+  send(command: TransactWriteCommand): Promise<TransactWriteCommandOutput>;
 }
 
 export class AwsDynamoDbAdapter implements DynamoDbDocumentPort {
@@ -60,9 +72,27 @@ export class AwsDynamoDbAdapter implements DynamoDbDocumentPort {
     }
   }
 
+  async put(input: PutCommandInput): Promise<PutCommandOutput> {
+    try {
+      return await this.client.send(new PutCommand(input));
+    } catch (error) {
+      throw mapDynamoDbError(error);
+    }
+  }
+
   async query(input: QueryCommandInput): Promise<QueryCommandOutput> {
     try {
       return await this.client.send(new QueryCommand(input));
+    } catch (error) {
+      throw mapDynamoDbError(error);
+    }
+  }
+
+  async transactWrite(
+    input: TransactWriteCommandInput,
+  ): Promise<TransactWriteCommandOutput> {
+    try {
+      return await this.client.send(new TransactWriteCommand(input));
     } catch (error) {
       throw mapDynamoDbError(error);
     }

@@ -42,6 +42,15 @@ export const primaryKeys = {
   galleryAsset: (assetId: string): PrimaryKey =>
     key(`GALLERY_ASSET#${id(assetId, "assetId")}`, "METADATA"),
   gymSettings: (): PrimaryKey => key("SETTINGS", "GYM"),
+  idempotency: (
+    operation: string,
+    subjectId: string,
+    requestKey: string,
+  ): PrimaryKey =>
+    key(
+      `IDEMPOTENCY#${id(operation, "operation")}#${id(subjectId, "subjectId")}`,
+      `REQUEST#${id(requestKey, "requestKey")}`,
+    ),
   membership: (
     userId: string,
     startDate: string,
