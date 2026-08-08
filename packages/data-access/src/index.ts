@@ -2,6 +2,7 @@ import type { DomainEntity } from "@gym-adr/domain";
 import type { EntityId } from "@gym-adr/shared";
 
 export * from "./base-repository";
+export * from "./class-session-repository";
 export * from "./dynamodb-adapter";
 export * from "./dynamodb-config";
 export * from "./dynamodb-errors";
@@ -13,6 +14,7 @@ export * from "./model-shards";
 export * from "./model-types";
 export * from "./model-validation";
 export * from "./payment-repository";
+export * from "./reservation-repository";
 export * from "./search-tokens";
 export * from "./user-repository";
 
