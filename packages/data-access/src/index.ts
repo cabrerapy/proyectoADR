@@ -6,11 +6,13 @@ export * from "./dynamodb-adapter";
 export * from "./dynamodb-config";
 export * from "./dynamodb-errors";
 export * from "./idempotency-repository";
+export * from "./membership-repository";
 export * from "./model-codecs";
 export * from "./model-keys";
 export * from "./model-shards";
 export * from "./model-types";
 export * from "./model-validation";
+export * from "./payment-repository";
 export * from "./search-tokens";
 export * from "./user-repository";
 
