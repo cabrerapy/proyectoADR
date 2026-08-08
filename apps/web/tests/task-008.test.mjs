@@ -17,7 +17,7 @@ test("TASK-008 pins a compatible OpenNext adapter", async () => {
     ),
   );
 
-  assert.equal(webPackage.dependencies.next, "16.2.12");
+  assert.equal(webPackage.dependencies.next, "16.3.0");
   assert.equal(webPackage.devDependencies["@opennextjs/aws"], "4.0.2");
   assert.equal(adapterPackage.version, "4.0.2");
   assert.equal(

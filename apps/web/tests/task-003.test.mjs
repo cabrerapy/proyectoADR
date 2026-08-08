@@ -17,7 +17,7 @@ test("TASK-003 configures App Router, strict TypeScript, and Tailwind", async ()
   const packageJson = JSON.parse(packageJsonSource);
   const tsconfig = JSON.parse(tsconfigSource);
 
-  assert.equal(packageJson.dependencies.next, "16.2.12");
+  assert.equal(packageJson.dependencies.next, "16.3.0");
   assert.equal(packageJson.devDependencies.tailwindcss, "^4");
   assert.equal(tsconfig.extends, "../../tsconfig.base.json");
   assert.notEqual(tsconfig.compilerOptions.allowJs, true);

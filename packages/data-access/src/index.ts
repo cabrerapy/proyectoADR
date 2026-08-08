@@ -11,6 +11,8 @@ export * from "./model-keys";
 export * from "./model-shards";
 export * from "./model-types";
 export * from "./model-validation";
+export * from "./search-tokens";
+export * from "./user-repository";
 
 export interface EntityReader<T extends DomainEntity> {
   findById(id: EntityId): Promise<T | undefined>;
