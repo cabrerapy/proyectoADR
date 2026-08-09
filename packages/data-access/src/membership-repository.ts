@@ -1,6 +1,7 @@
 import {
   MEMBERSHIP_FREQUENCIES,
   MEMBERSHIP_STATUSES,
+  canTransitionMembership,
   type Membership,
   type MembershipFrequency,
   type MembershipStatus,
@@ -8,6 +9,7 @@ import {
 import type { TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 
 import { BaseDynamoDbRepository } from "./base-repository";
+import { AuditLogRepository } from "./audit-log-repository";
 import type {
   DynamoDbDocumentPort,
   DynamoDbItem,
@@ -41,6 +43,8 @@ export type FinancialFanOutCursors = Readonly<
 >;
 
 export interface CreateMembershipInput {
+  readonly auditId: string;
+  readonly correlationId: string;
   readonly createdAt: string;
   readonly createdBy: string;
   readonly currency: string;
@@ -52,6 +56,21 @@ export interface CreateMembershipInput {
   readonly planName: string;
   readonly startDate: string;
   readonly status: MembershipStatus;
+  readonly userId: string;
+}
+
+export interface UpdateMembershipInput {
+  readonly actorId: string;
+  readonly auditId: string;
+  readonly correlationId: string;
+  readonly endDate: string;
+  readonly expectedAmount: number;
+  readonly expectedVersion: number;
+  readonly membershipId: string;
+  readonly reason?: string;
+  readonly startDate: string;
+  readonly status: MembershipStatus;
+  readonly updatedAt: string;
   readonly userId: string;
 }
 
@@ -114,6 +133,9 @@ const putAbsent = (table: string, item: DynamoDbItem): TransactionAction => ({
   },
 });
 
+const calendarEpochDay = (value: string): number =>
+  Math.floor(Date.parse(`${value}T00:00:00.000Z`) / 86_400_000);
+
 export class MembershipRepository {
   private readonly base: BaseDynamoDbRepository;
   private readonly table: string;
@@ -136,10 +158,19 @@ export class MembershipRepository {
     const actions: TransactionAction[] = [
       {
         ConditionCheck: {
-          ConditionExpression: "attribute_exists(#pk) AND #entityType = :profile",
-          ExpressionAttributeNames: { "#entityType": "entityType", "#pk": "PK" },
-          ExpressionAttributeValues: { ":profile": "UserProfile" },
+          ConditionExpression: "attribute_exists(#pk) AND #entityType = :profile AND #status = :active AND contains(#roles, :student)",
+          ExpressionAttributeNames: { "#entityType": "entityType", "#pk": "PK", "#roles": "roles", "#status": "status" },
+          ExpressionAttributeValues: { ":active": "ACTIVE", ":profile": "UserProfile", ":student": "STUDENT" },
           Key: primaryKeys.userProfile(membership.userId),
+          TableName: this.table,
+        },
+      },
+      {
+        ConditionCheck: {
+          ConditionExpression: "attribute_exists(#pk) AND #entityType = :plan AND #status = :active AND #name = :name AND #price = :price AND #currency = :currency AND #frequency = :frequency",
+          ExpressionAttributeNames: { "#currency": "currency", "#entityType": "entityType", "#frequency": "frequency", "#name": "name", "#pk": "PK", "#price": "price", "#status": "status" },
+          ExpressionAttributeValues: { ":active": "ACTIVE", ":currency": membership.currency, ":frequency": membership.frequency, ":name": membership.planName, ":plan": "MembershipPlan", ":price": membership.expectedAmount },
+          Key: primaryKeys.membershipPlan(membership.planId),
           TableName: this.table,
         },
       },
@@ -150,6 +181,7 @@ export class MembershipRepository {
     if (membership.status === "ACTIVE") {
       actions.push(putAbsent(this.table, this.activePointer(membership, key)));
     }
+    actions.push(this.auditAction(membership, input.auditId, input.correlationId, "MEMBERSHIP_CREATED"));
 
     try {
       await this.document.transactWrite({ TransactItems: actions });
@@ -167,6 +199,125 @@ export class MembershipRepository {
       throw mapped;
     }
     return membership;
+  }
+
+  async getById(
+    userId: string,
+    startDate: string,
+    membershipId: string,
+    consistentRead = true,
+  ): Promise<Membership | undefined> {
+    const key = primaryKeys.membership(
+      financialId(userId, "userId"),
+      financialDate(startDate, "startDate"),
+      financialId(membershipId, "membershipId"),
+    );
+    const item = await this.base.get(key, consistentRead);
+    return item === undefined ? undefined : this.readMembership(item, key);
+  }
+
+  async update(input: UpdateMembershipInput): Promise<Membership> {
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1 || !isMembershipStatus(input.status)) {
+      throw invalidDynamoDbInput("La versión o el estado de membresía no es válido.");
+    }
+    const current = await this.getById(input.userId, input.startDate, input.membershipId, true);
+    if (current === undefined) {
+      throw new DynamoDbRepositoryError("RESOURCE_NOT_FOUND", "La membresía solicitada no existe.");
+    }
+    if (current.version !== input.expectedVersion) {
+      throw membershipError("MEMBERSHIP_CONFLICT", "La membresía fue modificada por otra operación.");
+    }
+    if (current.status !== input.status && !canTransitionMembership(current.status, input.status)) {
+      throw membershipError("MEMBERSHIP_CONFLICT", "La transición de estado no está permitida.");
+    }
+    const next = this.validateCreate({
+      auditId: input.auditId,
+      correlationId: input.correlationId,
+      createdAt: current.createdAt,
+      createdBy: current.createdBy,
+      currency: current.currency,
+      endDate: input.endDate,
+      expectedAmount: input.expectedAmount,
+      frequency: current.frequency,
+      membershipId: current.id,
+      planId: current.planId,
+      planName: current.planName,
+      startDate: current.startDate,
+      status: input.status,
+      userId: current.userId,
+    }, current.version + 1, input.updatedAt);
+    if (next.updatedAt < current.updatedAt) {
+      throw invalidDynamoDbInput("updatedAt no puede ser anterior a la versión vigente.");
+    }
+    const key = primaryKeys.membership(next.userId, next.startDate, next.id);
+    const actions: TransactionAction[] = [
+      {
+        Put: {
+          ConditionExpression: "attribute_exists(#pk) AND #version = :expectedVersion",
+          ExpressionAttributeNames: { "#pk": "PK", "#version": "version" },
+          ExpressionAttributeValues: { ":expectedVersion": current.version },
+          Item: this.toItem(next, key),
+          TableName: this.table,
+        },
+      },
+      { Put: { Item: this.dueView(next, key), TableName: this.table } },
+    ];
+    if (next.status === "ACTIVE") {
+      actions.push({
+        ConditionCheck: {
+          ConditionExpression: "attribute_exists(#pk) AND #entityType = :profile AND #status = :active AND contains(#roles, :student)",
+          ExpressionAttributeNames: { "#entityType": "entityType", "#pk": "PK", "#roles": "roles", "#status": "status" },
+          ExpressionAttributeValues: { ":active": "ACTIVE", ":profile": "UserProfile", ":student": "STUDENT" },
+          Key: primaryKeys.userProfile(next.userId),
+          TableName: this.table,
+        },
+      });
+    }
+    if (current.status === next.status) {
+      actions.push({ Put: { Item: this.statusView(next, key), TableName: this.table } });
+    } else {
+      actions.push({ Delete: { Key: primaryKeys.view("Membership", current.id, `STATUS_${current.status}`, current.userId), TableName: this.table } });
+      actions.push(putAbsent(this.table, this.statusView(next, key)));
+    }
+    const pointerKey = primaryKeys.activeMembership(next.userId);
+    if (current.status !== "ACTIVE" && next.status === "ACTIVE") {
+      actions.push(putAbsent(this.table, this.activePointer(next, key)));
+    } else if (current.status === "ACTIVE" && next.status === "ACTIVE") {
+      actions.push({ Put: {
+        ConditionExpression: "#canonicalPK = :canonicalPK AND #canonicalSK = :canonicalSK",
+        ExpressionAttributeNames: { "#canonicalPK": "canonicalPK", "#canonicalSK": "canonicalSK" },
+        ExpressionAttributeValues: { ":canonicalPK": key.PK, ":canonicalSK": key.SK },
+        Item: this.activePointer(next, key),
+        TableName: this.table,
+      } });
+    } else if (current.status === "ACTIVE") {
+      actions.push({ Delete: {
+        ConditionExpression: "#canonicalPK = :canonicalPK AND #canonicalSK = :canonicalSK",
+        ExpressionAttributeNames: { "#canonicalPK": "canonicalPK", "#canonicalSK": "canonicalSK" },
+        ExpressionAttributeValues: { ":canonicalPK": key.PK, ":canonicalSK": key.SK },
+        Key: pointerKey,
+        TableName: this.table,
+      } });
+    }
+    actions.push(this.auditAction(
+      next,
+      input.auditId,
+      input.correlationId,
+      current.status === next.status ? "MEMBERSHIP_UPDATED" : `MEMBERSHIP_STATUS_${next.status}`,
+      current,
+      input.reason,
+      input.actorId,
+    ));
+    try {
+      await this.document.transactWrite({ TransactItems: actions });
+    } catch (error) {
+      const mapped = mapDynamoDbError(error);
+      if (mapped.code === "TRANSACTION_CANCELLED" || mapped.code === "CONDITIONAL_CHECK_FAILED") {
+        throw membershipError("MEMBERSHIP_CONFLICT", "La membresía cambió durante la operación.");
+      }
+      throw mapped;
+    }
+    return next;
   }
 
   destroy(): void {
@@ -258,11 +409,45 @@ export class MembershipRepository {
       canonicalSK: canonicalKey.SK,
       createdAt: membership.createdAt,
       entityType: "ActiveMembershipPointer",
+      endDate: membership.endDate,
+      endEpochDay: calendarEpochDay(membership.endDate),
       membershipId: membership.id,
       schemaVersion: CURRENT_SCHEMA_VERSION,
+      startDate: membership.startDate,
+      startEpochDay: calendarEpochDay(membership.startDate),
+      status: membership.status,
       updatedAt: membership.updatedAt,
       userId: membership.userId,
     };
+  }
+
+  private auditAction(
+    membership: Membership,
+    auditId: string,
+    correlationId: string,
+    action: string,
+    previous?: Membership,
+    reason?: string,
+    actorId = membership.createdBy,
+  ): TransactionAction {
+    return new AuditLogRepository(this.document, this.table).createAppendAction({
+      action,
+      actorId,
+      auditId,
+      correlationId,
+      details: {
+        endDate: membership.endDate,
+        expectedAmount: membership.expectedAmount,
+        ...(previous === undefined ? {} : { fromStatus: previous.status }),
+        ...(reason === undefined ? {} : { reason }),
+        status: membership.status,
+        version: membership.version,
+      },
+      result: "SUCCEEDED",
+      targetId: membership.id,
+      targetType: "Membership",
+      timestamp: membership.updatedAt,
+    }).action;
   }
 
   private dueView(membership: Membership, canonicalKey: PrimaryKey): DynamoDbItem {
@@ -407,6 +592,8 @@ export class MembershipRepository {
     }
     try {
       return this.validateCreate({
+        auditId: "read-only",
+        correlationId: "read-only",
         createdAt: item.createdAt,
         createdBy: item.createdBy,
         currency: item.currency,
@@ -435,6 +622,7 @@ export class MembershipRepository {
       createdBy: membership.createdBy,
       currency: membership.currency,
       endDate: membership.endDate,
+      endEpochDay: calendarEpochDay(membership.endDate),
       entityType: "Membership",
       expectedAmount: membership.expectedAmount,
       frequency: membership.frequency,
@@ -443,6 +631,7 @@ export class MembershipRepository {
       planName: membership.planName,
       schemaVersion: CURRENT_SCHEMA_VERSION,
       startDate: membership.startDate,
+      startEpochDay: calendarEpochDay(membership.startDate),
       status: membership.status,
       updatedAt: membership.updatedAt,
       userId: membership.userId,

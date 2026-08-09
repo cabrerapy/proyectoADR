@@ -4,28 +4,37 @@ import {
   DynamoDbRepositoryError,
   type CompletePendingProfileInput,
   type CreateMembershipPlanInput,
+  type CreateMembershipInput,
   type CreatePendingUserResult,
   type MembershipPlanCursors,
   type MembershipPlanPage,
   type TransitionUserStatusInput,
   type UpdateMembershipPlanInput,
+  type UpdateMembershipInput,
   type UpdateOwnUserProfileInput,
   type UserPage,
 } from "@gym-adr/data-access";
 import {
   USER_STATUSES,
   AuthorizationDeniedError,
+  localCalendarDate,
+  membershipStanding,
+  type Membership,
   type MembershipPlan,
+  type MembershipStanding,
   type UserProfile,
   type UserStatus,
 } from "@gym-adr/domain";
 import type {
   AdminStudentQuery,
+  CreateMembershipCommand,
   CompleteProfileInput,
   MembershipPlanCommand,
   MembershipPlanQuery,
+  MembershipHistoryQuery,
   TransitionStudentStatusInput,
   UpdateMembershipPlanCommand,
+  UpdateMembershipCommand,
   UpdateOwnProfileInput,
 } from "@gym-adr/validation";
 
@@ -74,6 +83,13 @@ export interface MembershipPlanPort {
     readonly cursors?: MembershipPlanCursors;
   }): Promise<MembershipPlanPage>;
   update(input: UpdateMembershipPlanInput): Promise<MembershipPlan>;
+}
+
+export interface MembershipPort {
+  create(input: CreateMembershipInput): Promise<Membership>;
+  getById(userId: string, startDate: string, membershipId: string, consistentRead?: boolean): Promise<Membership | undefined>;
+  listHistory(userId: string, options?: { readonly consistentRead?: boolean; readonly limit?: number }): Promise<{ readonly memberships: readonly Membership[] }>;
+  update(input: UpdateMembershipInput): Promise<Membership>;
 }
 
 export interface OnboardingProfile {
@@ -126,10 +142,23 @@ export interface AdminMembershipPlanPage {
   readonly plans: readonly MembershipPlan[];
 }
 
+export interface AdminMembershipView extends Membership {
+  readonly standing: MembershipStanding;
+}
+
+export interface AdminMembershipPage {
+  readonly capabilities: {
+    readonly canManageStates: boolean;
+    readonly canWrite: boolean;
+  };
+  readonly memberships: readonly AdminMembershipView[];
+}
+
 export interface AuthServiceDependencies {
   readonly clock?: () => Date;
   readonly config: AuthConfig;
   readonly ids?: () => string;
+  readonly memberships?: MembershipPort;
   readonly plans?: MembershipPlanPort;
   readonly rateLimiter: RateLimiter;
   readonly tokens: CognitoTokenPort;
@@ -647,6 +676,129 @@ export class AuthService {
     }
   }
 
+  async listAdminMemberships(
+    request: Request,
+    query: MembershipHistoryQuery,
+  ): Promise<AdminMembershipPage> {
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "membership-read"), 60);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("MEMBERSHIP_MANAGE_OPERATIONAL");
+      const result = await this.membershipRepository().listHistory(query.userId, {
+        consistentRead: true,
+        limit: 50,
+      });
+      return {
+        capabilities: {
+          canManageStates: principal.roles.includes("ADMIN"),
+          canWrite: true,
+        },
+        memberships: result.memberships.map((membership) => ({
+          ...membership,
+          standing: membershipStanding(membership, this.clock()),
+        })),
+      };
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible consultar las membresías.");
+    }
+  }
+
+  async createAdminMembership(
+    request: Request,
+    correlationId: string,
+    input: CreateMembershipCommand,
+  ): Promise<AdminMembershipView> {
+    this.assertSameOrigin(request);
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "membership-write"), 20);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("MEMBERSHIP_MANAGE_OPERATIONAL");
+      const plan = await this.planRepository().getById(input.planId, true);
+      if (plan === undefined || plan.status !== "ACTIVE") {
+        throw new ApiError(422, apiErrorCodes.validationError, "Selecciona un plan activo.");
+      }
+      if (input.expectedAmount !== plan.price) {
+        throw new ApiError(422, apiErrorCodes.validationError, "El importe debe coincidir con el precio vigente del plan.");
+      }
+      const now = this.clock();
+      const membership = await this.membershipRepository().create({
+        auditId: this.ids(),
+        correlationId,
+        createdAt: now.toISOString(),
+        createdBy: principal.id,
+        currency: plan.currency,
+        endDate: input.endDate,
+        expectedAmount: input.expectedAmount,
+        frequency: plan.frequency,
+        membershipId: this.ids(),
+        planId: plan.id,
+        planName: plan.name,
+        startDate: input.startDate,
+        status: "PENDING",
+        userId: input.userId,
+      });
+      return { ...membership, standing: membershipStanding(membership, now) };
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      this.rethrowMembershipPersistence(error, "crear");
+    }
+  }
+
+  async updateAdminMembership(
+    request: Request,
+    correlationId: string,
+    membershipId: string,
+    input: UpdateMembershipCommand,
+  ): Promise<AdminMembershipView> {
+    this.assertSameOrigin(request);
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "membership-write"), 20);
+    try {
+      const scope = new AuthorizedRepositoryScope(principalFromProfile(principal));
+      scope.require("MEMBERSHIP_MANAGE_OPERATIONAL");
+      const repository = this.membershipRepository();
+      const current = await repository.getById(input.userId, input.startDate, membershipId, true);
+      if (current === undefined) throw new ApiError(404, apiErrorCodes.notFound, "No se encontró la membresía solicitada.");
+      const changesState = current.status !== input.status;
+      if (changesState) scope.require("MEMBERSHIP_MANAGE_FULL");
+      if (!principal.roles.includes("ADMIN") && current.status !== "PENDING") {
+        throw new ApiError(403, apiErrorCodes.forbidden, "El personal solo puede editar membresías pendientes.");
+      }
+      if ((input.status === "SUSPENDED" || input.status === "CANCELLED") && input.reason === undefined) {
+        throw new ApiError(422, apiErrorCodes.validationError, "Indica el motivo del cambio de estado.");
+      }
+      const now = this.clock();
+      if (input.status === "ACTIVE" && localCalendarDate(now) > input.endDate) {
+        throw new ApiError(422, apiErrorCodes.validationError, "No se puede activar una membresía cuyo vencimiento ya pasó.");
+      }
+      if (input.status === "EXPIRED" && localCalendarDate(now) <= current.endDate) {
+        throw new ApiError(422, apiErrorCodes.validationError, "La membresía todavía no alcanzó su fecha de vencimiento.");
+      }
+      const membership = await repository.update({
+        actorId: principal.id,
+        auditId: this.ids(),
+        correlationId,
+        endDate: input.endDate,
+        expectedAmount: input.expectedAmount,
+        expectedVersion: input.expectedVersion,
+        membershipId,
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
+        startDate: input.startDate,
+        status: input.status,
+        updatedAt: now.toISOString(),
+        userId: input.userId,
+      });
+      return { ...membership, standing: membershipStanding(membership, now) };
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      this.rethrowMembershipPersistence(error, "actualizar");
+    }
+  }
+
   logout(request: Request): Response {
     this.assertSameOrigin(request);
     this.assertRateLimit(requestRateKey(request, "logout"), 20);
@@ -708,6 +860,28 @@ export class AuthService {
       throw new ApiError(500, apiErrorCodes.internalError, "El servicio de planes no está configurado.");
     }
     return this.dependencies.plans;
+  }
+
+  private membershipRepository(): MembershipPort {
+    if (this.dependencies.memberships === undefined) {
+      throw new ApiError(500, apiErrorCodes.internalError, "El servicio de membresías no está configurado.");
+    }
+    return this.dependencies.memberships;
+  }
+
+  private rethrowMembershipPersistence(error: unknown, operation: string): never {
+    if (error instanceof DynamoDbRepositoryError) {
+      if (error.code === "RESOURCE_NOT_FOUND") {
+        throw new ApiError(404, apiErrorCodes.notFound, "No se encontró la membresía solicitada.");
+      }
+      if (error.code === "MEMBERSHIP_CONFLICT") {
+        throw new ApiError(409, apiErrorCodes.conflict, "La membresía cambió o existe otra membresía activa. Actualiza antes de reintentar.");
+      }
+      if (error.code === "INVALID_INPUT") {
+        throw new ApiError(422, apiErrorCodes.validationError, "Los datos de la membresía no son válidos.");
+      }
+    }
+    throw new ApiError(502, apiErrorCodes.internalError, `No fue posible ${operation} la membresía.`);
   }
 
   private rethrowAuthorization(error: unknown): void {

@@ -240,6 +240,7 @@ JSON bajo `/api/v1`, paginación por cursor opaco y error `{ code, message, corr
 | `DELETE /reservations/{id}` | propietario | Cancelación idempotente dentro de plazo |
 | `GET/PATCH /admin/students/{id}` | rol autorizado | Consulta/transición auditada |
 | `GET/POST /admin/plans`, `GET/PATCH /admin/plans/{id}` | STAFF lectura; ADMIN mutación | Catálogo por estado y CRUD lógico auditado |
+| `GET/POST /admin/memberships`, `PATCH /admin/memberships/{id}` | STAFF operativo; ADMIN estados | Historial por alumno y mutación transaccional auditada |
 | `POST /admin/payments` | STAFF/ADMIN | Pago y vistas materializadas transaccionales |
 | `POST /admin/payments/{id}/void` | ADMIN | Elemento de anulación/compensación, no borrado |
 | `POST/PATCH /admin/class-sessions` | STAFF/ADMIN | Sesión y claves de índices actualizadas |
@@ -266,7 +267,9 @@ Reconstrucción: `Query` fuerte sobre `PK=CLASS#{id}` y `begins_with(SK,'RESERVA
 
 Planes son plantillas canónicas en `PLAN#{id}/METADATA`. Cada plan activo o inactivo proyecta `GSI1PK=PLAN_STATUS#{status}#Sx` y `GSI1SK=NAME#{nombreNormalizado}#PLAN#{id}`; el listado consulta cuatro shards por estado y relee canónicos con `BatchGetItem` fuerte. Crear o editar reemplaza condicionalmente el canónico por versión y agrega auditoría en un único `TransactWriteItems`; la baja es el estado `INACTIVE`, nunca una eliminación física. El nombre del plan no es PII y solo se normaliza para ordenar el catálogo; un volumen bajo y cuatro shards limitan el riesgo de partición caliente.
 
-La membresía histórica congela plan, importe, moneda y frecuencia. Activar/cambiar membresía actualiza transaccionalmente elemento histórico, puntero `MEMBERSHIP#ACTIVE`, vistas de vencimiento/estado e auditoría, condicionando versiones y estado previo. La elegibilidad usa el puntero canónico con lectura/condición fuerte, no GSI.
+La membresía histórica congela plan, importe, moneda y frecuencia. Se crea en `PENDING`; las transiciones permitidas son `PENDING → ACTIVE/CANCELLED`, `ACTIVE → SUSPENDED/EXPIRED/CANCELLED` y `SUSPENDED → ACTIVE/EXPIRED/CANCELLED`. `EXPIRED` y `CANCELLED` son terminales. `STAFF` solo puede crear y editar datos operativos mientras está pendiente; `ADMIN` controla estados y los cambios sensibles exigen motivo.
+
+Activar/cambiar membresía actualiza transaccionalmente elemento histórico, puntero `MEMBERSHIP#ACTIVE`, vistas de vencimiento/estado e auditoría, condicionando versión, estado previo, alumno `ACTIVE/STUDENT` y unicidad del puntero. El puntero guarda `status`, fechas y días epoch para condiciones futuras de reserva. La vigencia se calcula con el día calendario de `America/Asuncion`: una membresía es vigente únicamente con estado `ACTIVE` y fecha local dentro del intervalo inclusivo; antes del inicio es próxima y después del vencimiento está en mora. La elegibilidad usa el puntero canónico con lectura/condición fuerte, no GSI.
 
 Registrar pago crea en una transacción: elemento canónico, vista por fecha, vista por estado, idempotencia y auditoría, tras `ConditionCheck` de membresía/alumno. Un pago `CONFIRMED` no se sobreescribe ni elimina. Anulación crea elemento `PAYMENT_CORRECTION#{timestamp}#{id}` que referencia al original y actualiza solo el estado permitido con condición; ajustes compensatorios son pagos separados enlazados. Toda vista se actualiza en la misma transacción.
 

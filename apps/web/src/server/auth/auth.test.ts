@@ -5,7 +5,7 @@ import {
   SignJWT,
 } from "jose";
 import type { CreatePendingUserResult } from "@gym-adr/data-access";
-import type { MembershipPlan, UserProfile } from "@gym-adr/domain";
+import type { Membership, MembershipPlan, UserProfile } from "@gym-adr/domain";
 import {
   validateAdminStudentQuery,
   validateCompleteProfile,
@@ -18,7 +18,7 @@ import {
 import { describe, expect, it, vi } from "vitest";
 
 import { resolveAuthConfig, type AuthConfig } from "./auth-config";
-import { AuthService, type MembershipPlanPort, type PendingUserPort } from "./auth-service";
+import { AuthService, type MembershipPlanPort, type MembershipPort, type PendingUserPort } from "./auth-service";
 import { CognitoTokenClient, type CognitoTokenPort } from "./cognito-client";
 import { oauthCookieNames, sessionCookieName } from "./cookies";
 import { FixedWindowRateLimiter } from "./rate-limiter";
@@ -212,17 +212,64 @@ describe("OAuth session service", () => {
         return plan;
       }),
     };
+    const memberships = new Map<string, Membership>();
+    const membershipPort: MembershipPort = {
+      create: vi.fn(async (input) => {
+        const membership: Membership = {
+          createdAt: input.createdAt,
+          createdBy: input.createdBy,
+          currency: input.currency,
+          endDate: input.endDate,
+          expectedAmount: input.expectedAmount,
+          frequency: input.frequency,
+          id: input.membershipId,
+          planId: input.planId,
+          planName: input.planName,
+          startDate: input.startDate,
+          status: input.status,
+          updatedAt: input.createdAt,
+          userId: input.userId,
+          version: 1,
+        };
+        memberships.set(membership.id, membership);
+        return membership;
+      }),
+      getById: vi.fn(async (userId, startDate, membershipId) => {
+        const membership = memberships.get(membershipId);
+        return membership !== undefined && membership.userId === userId && membership.startDate === startDate
+          ? membership
+          : undefined;
+      }),
+      listHistory: vi.fn(async (userId) => ({
+        memberships: [...memberships.values()].filter((membership) => membership.userId === userId),
+      })),
+      update: vi.fn(async (input) => {
+        const current = memberships.get(input.membershipId);
+        if (current === undefined) throw new Error("missing test membership");
+        const membership: Membership = {
+          ...current,
+          endDate: input.endDate,
+          expectedAmount: input.expectedAmount,
+          status: input.status,
+          updatedAt: input.updatedAt,
+          version: input.expectedVersion + 1,
+        };
+        memberships.set(membership.id, membership);
+        return membership;
+      }),
+    };
     let sequence = 0;
     const service = new AuthService({
       clock: () => new Date("2026-08-08T12:00:00Z"),
       config,
       ids: () => `user-${++sequence}`,
+      memberships: membershipPort,
       plans: planPort,
       rateLimiter,
       tokens,
       users: userPort,
     });
-    return { completed, planPort, plans, service, tokens, userPort, users };
+    return { completed, membershipPort, memberships, planPort, plans, service, tokens, userPort, users };
   };
 
   it("starts authorization with state, nonce, S256 PKCE and hardened cookies", () => {
@@ -807,6 +854,85 @@ describe("OAuth session service", () => {
       new Request("https://app.example.com/api/v1/admin/plans"),
       { status: "ALL" },
     )).rejects.toMatchObject({ code: "AUTHENTICATION_REQUIRED", status: 401 });
+  });
+
+  it("lets an active ADMIN create, activate and suspend an audited membership", async () => {
+    const { completed, membershipPort, plans, service, userPort } = setup();
+    plans.set("plan-1", {
+      createdAt: "2026-08-08T10:00:00Z", createdBy: "admin-1", currency: "PYG",
+      frequency: "MONTHLY", id: "plan-1", name: "Plan mensual", price: 250_000,
+      status: "ACTIVE", updatedAt: "2026-08-08T10:00:00Z", updatedBy: "admin-1", version: 1,
+    });
+    const actor = { ...identity, createdAt: "2026-08-08T12:00:00Z", userId: "admin-1" };
+    await userPort.createPending(actor);
+    completed.set(actor.userId, {
+      createdAt: actor.createdAt, displayName: "Administradora", email: actor.email,
+      emailVerified: true, id: actor.userId, roles: ["ADMIN"], status: "ACTIVE",
+      updatedAt: actor.createdAt, version: 2,
+    });
+    const request = new Request("https://app.example.com/api/v1/admin/memberships", {
+      headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token`, origin: config.appBaseUrl }, method: "POST",
+    });
+    const created = await service.createAdminMembership(request, "correlation-create", {
+      endDate: "2026-09-08", expectedAmount: 250_000, planId: "plan-1",
+      startDate: "2026-08-08", userId: "student-1",
+    });
+    expect(created).toMatchObject({ standing: "INACTIVE", status: "PENDING" });
+    await expect(service.listAdminMemberships(request, { userId: "student-1" }))
+      .resolves.toMatchObject({ capabilities: { canManageStates: true }, memberships: [{ id: created.id }] });
+    const active = await service.updateAdminMembership(request, "correlation-active", created.id, {
+      endDate: created.endDate, expectedAmount: created.expectedAmount, expectedVersion: 1,
+      startDate: created.startDate, status: "ACTIVE", userId: created.userId,
+    });
+    expect(active).toMatchObject({ standing: "CURRENT", status: "ACTIVE", version: 2 });
+    await expect(service.updateAdminMembership(request, "correlation-suspend", created.id, {
+      endDate: active.endDate, expectedAmount: active.expectedAmount, expectedVersion: 2,
+      reason: "Suspensión administrativa solicitada", startDate: active.startDate,
+      status: "SUSPENDED", userId: active.userId,
+    })).resolves.toMatchObject({ standing: "INACTIVE", status: "SUSPENDED", version: 3 });
+    expect(membershipPort.update).toHaveBeenLastCalledWith(expect.objectContaining({ actorId: actor.userId }));
+  });
+
+  it("allows STAFF operational edits but denies state changes and blocks unauthorized states", async () => {
+    for (const scenario of [
+      { allowed: true, roles: ["STAFF"] as const, status: "ACTIVE" as const },
+      { allowed: false, roles: ["STUDENT"] as const, status: "ACTIVE" as const },
+      { allowed: false, roles: ["ADMIN"] as const, status: "PENDING" as const },
+      { allowed: false, roles: ["ADMIN"] as const, status: "SUSPENDED" as const },
+      { allowed: false, roles: ["ADMIN"] as const, status: "INACTIVE" as const },
+    ]) {
+      const { completed, membershipPort, memberships, service, userPort } = setup();
+      const actor = { ...identity, createdAt: "2026-08-08T12:00:00Z", userId: `membership-${scenario.status}-${scenario.roles[0]}` };
+      await userPort.createPending(actor);
+      completed.set(actor.userId, {
+        createdAt: actor.createdAt, displayName: "Actor", email: actor.email, emailVerified: true,
+        id: actor.userId, roles: scenario.roles, status: scenario.status, updatedAt: actor.createdAt, version: 2,
+      });
+      const pending: Membership = {
+        createdAt: actor.createdAt, createdBy: "admin", currency: "PYG", endDate: "2026-09-08",
+        expectedAmount: 250_000, frequency: "MONTHLY", id: "membership-1", planId: "plan-1",
+        planName: "Plan mensual", startDate: "2026-08-08", status: "PENDING",
+        updatedAt: actor.createdAt, userId: "student-1", version: 1,
+      };
+      memberships.set(pending.id, pending);
+      const request = new Request("https://app.example.com/api/v1/admin/memberships", {
+        headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token`, origin: config.appBaseUrl }, method: "PATCH",
+      });
+      if (scenario.allowed) {
+        await expect(service.updateAdminMembership(request, "correlation-edit", pending.id, {
+          endDate: "2026-09-10", expectedAmount: pending.expectedAmount, expectedVersion: 1,
+          startDate: pending.startDate, status: "PENDING", userId: pending.userId,
+        })).resolves.toMatchObject({ endDate: "2026-09-10" });
+        await expect(service.updateAdminMembership(request, "correlation-state", pending.id, {
+          endDate: pending.endDate, expectedAmount: pending.expectedAmount, expectedVersion: 1,
+          startDate: pending.startDate, status: "ACTIVE", userId: pending.userId,
+        })).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+      } else {
+        await expect(service.listAdminMemberships(request, { userId: pending.userId }))
+          .rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+        expect(membershipPort.update).not.toHaveBeenCalled();
+      }
+    }
   });
 });
 

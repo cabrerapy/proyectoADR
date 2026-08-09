@@ -16,6 +16,8 @@ const createPort = (): DynamoDbDocumentPort => ({
 });
 
 const membershipInput = {
+  auditId: "audit-membership-001",
+  correlationId: "correlation-membership-001",
   createdAt: "2026-08-08T12:00:00Z",
   createdBy: "admin-001",
   currency: "PYG",
@@ -60,7 +62,7 @@ describe("financial repositories", () => {
     });
 
     const transaction = vi.mocked(port.transactWrite).mock.calls[0]?.[0];
-    expect(transaction?.TransactItems).toHaveLength(5);
+    expect(transaction?.TransactItems).toHaveLength(7);
     expect(transaction?.TransactItems).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ ConditionCheck: expect.any(Object) }),

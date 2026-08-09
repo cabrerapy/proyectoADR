@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
   createDynamoDbAdapter,
+  AuditLogRepository,
   MembershipRepository,
   PaymentRepository,
   primaryKeys,
@@ -24,9 +25,12 @@ const client = new DynamoDBClient({
 });
 const adapter = createDynamoDbAdapter({ environment: "local" });
 const memberships = new MembershipRepository(adapter, tableName);
+const audits = new AuditLogRepository(adapter, tableName);
 const payments = new PaymentRepository(adapter, tableName);
 
 const membershipInput = {
+  auditId: "audit-membership-001",
+  correlationId: "correlation-membership-001",
   createdAt: "2026-08-08T12:00:00Z",
   createdBy: "admin-001",
   currency: "PYG",
@@ -88,12 +92,13 @@ describe.skipIf(!enabled)("financial repositories with DynamoDB Local", () => {
         TableName: tableName,
       }),
     );
-    for (const userId of ["user-001", "user-002"]) {
+    for (const userId of ["user-001", "user-002", "user-003"]) {
       await adapter.put({
         Item: {
           ...primaryKeys.userProfile(userId),
           createdAt: "2026-08-08T10:00:00Z",
           entityType: "UserProfile",
+          roles: ["STUDENT"],
           schemaVersion: 1,
           status: "ACTIVE",
           updatedAt: "2026-08-08T10:00:00Z",
@@ -102,6 +107,25 @@ describe.skipIf(!enabled)("financial repositories with DynamoDB Local", () => {
         TableName: tableName,
       });
     }
+    await adapter.put({
+      Item: {
+        ...primaryKeys.membershipPlan("plan-001"),
+        createdAt: "2026-08-08T10:00:00Z",
+        createdBy: "admin-001",
+        currency: "PYG",
+        entityType: "MembershipPlan",
+        frequency: "MONTHLY",
+        name: "Plan mensual",
+        planId: "plan-001",
+        price: 250_000,
+        schemaVersion: 1,
+        status: "ACTIVE",
+        updatedAt: "2026-08-08T10:00:00Z",
+        updatedBy: "admin-001",
+        version: 1,
+      },
+      TableName: tableName,
+    });
   });
 
   afterAll(async () => {
@@ -144,6 +168,56 @@ describe.skipIf(!enabled)("financial repositories with DynamoDB Local", () => {
     expect(attempts.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
     expect(attempts.find(({ status }) => status === "rejected"))
       .toMatchObject({ reason: { code: "MEMBERSHIP_CONFLICT" } });
+  });
+
+  it("moves a pending membership through the active pointer and suspension atomically", async () => {
+    const pending = await memberships.create({
+      ...membershipInput,
+      auditId: "audit-membership-pending",
+      membershipId: "membership-004",
+      status: "PENDING",
+      userId: "user-003",
+    });
+    expect(await memberships.getActive("user-003")).toBeUndefined();
+    const active = await memberships.update({
+      actorId: "admin-001",
+      auditId: "audit-membership-active",
+      correlationId: "correlation-membership-active",
+      endDate: pending.endDate,
+      expectedAmount: pending.expectedAmount,
+      expectedVersion: pending.version,
+      membershipId: pending.id,
+      startDate: pending.startDate,
+      status: "ACTIVE",
+      updatedAt: "2026-08-08T12:05:00Z",
+      userId: pending.userId,
+    });
+    await expect(memberships.getActive("user-003")).resolves.toMatchObject({
+      id: pending.id,
+      status: "ACTIVE",
+    });
+    const suspended = await memberships.update({
+      actorId: "admin-001",
+      auditId: "audit-membership-suspended",
+      correlationId: "correlation-membership-suspended",
+      endDate: active.endDate,
+      expectedAmount: active.expectedAmount,
+      expectedVersion: active.version,
+      membershipId: active.id,
+      reason: "Solicitud administrativa documentada",
+      startDate: active.startDate,
+      status: "SUSPENDED",
+      updatedAt: "2026-08-08T12:10:00Z",
+      userId: active.userId,
+    });
+    expect(suspended).toMatchObject({ status: "SUSPENDED", version: 3 });
+    expect(await memberships.getActive("user-003")).toBeUndefined();
+    await expect(audits.listByEntity(
+      "Membership",
+      pending.id,
+      "2026-08-08T00:00:00Z",
+      "2026-08-09T00:00:00Z",
+    )).resolves.toMatchObject({ entries: [{ action: "MEMBERSHIP_CREATED" }, { action: "MEMBERSHIP_STATUS_ACTIVE" }, { action: "MEMBERSHIP_STATUS_SUSPENDED" }] });
   });
 
   it("records one idempotent payment and resolves history/date/status", async () => {

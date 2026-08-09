@@ -55,6 +55,50 @@ export interface Membership {
   readonly version: number;
 }
 
+export const MEMBERSHIP_STATUS_TRANSITIONS = {
+  ACTIVE: ["SUSPENDED", "EXPIRED", "CANCELLED"],
+  CANCELLED: [],
+  EXPIRED: [],
+  PENDING: ["ACTIVE", "CANCELLED"],
+  SUSPENDED: ["ACTIVE", "EXPIRED", "CANCELLED"],
+} as const satisfies Readonly<Record<MembershipStatus, readonly MembershipStatus[]>>;
+
+export type MembershipStanding = "UPCOMING" | "CURRENT" | "OVERDUE" | "INACTIVE";
+
+export const canTransitionMembership = (
+  from: MembershipStatus,
+  to: MembershipStatus,
+): boolean => MEMBERSHIP_STATUS_TRANSITIONS[from].some((candidate) => candidate === to);
+
+export const localCalendarDate = (
+  instant: Date,
+  timeZone = "America/Asuncion",
+): string => {
+  if (Number.isNaN(instant.getTime())) throw new RangeError("El instante no es válido.");
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    day: "2-digit",
+    month: "2-digit",
+    timeZone,
+    year: "numeric",
+  }).formatToParts(instant);
+  const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  if (value.year === undefined || value.month === undefined || value.day === undefined) {
+    throw new RangeError("No fue posible calcular la fecha local.");
+  }
+  return `${value.year}-${value.month}-${value.day}`;
+};
+
+export const membershipStanding = (
+  membership: Pick<Membership, "endDate" | "startDate" | "status">,
+  instant: Date,
+  timeZone = "America/Asuncion",
+): MembershipStanding => {
+  if (membership.status !== "ACTIVE") return "INACTIVE";
+  const today = localCalendarDate(instant, timeZone);
+  if (today < membership.startDate) return "UPCOMING";
+  return today <= membership.endDate ? "CURRENT" : "OVERDUE";
+};
+
 export const PAYMENT_METHODS = [
   "CASH",
   "BANK_TRANSFER",
