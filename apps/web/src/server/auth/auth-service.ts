@@ -4,9 +4,13 @@ import {
   DynamoDbRepositoryError,
   type CompletePendingProfileInput,
   type CreatePendingUserResult,
+  type UpdateOwnUserProfileInput,
 } from "@gym-adr/data-access";
 import { AuthorizationDeniedError, type UserProfile } from "@gym-adr/domain";
-import type { CompleteProfileInput } from "@gym-adr/validation";
+import type {
+  CompleteProfileInput,
+  UpdateOwnProfileInput,
+} from "@gym-adr/validation";
 
 import { ApiError, apiErrorCodes } from "../http/api-error";
 import type { AuthConfig } from "./auth-config";
@@ -34,6 +38,7 @@ export interface PendingUserPort {
   }): Promise<CreatePendingUserResult>;
   completePendingProfile(input: CompletePendingProfileInput): Promise<UserProfile>;
   findByCognitoSub(cognitoSub: string): Promise<UserProfile | undefined>;
+  updateOwn(input: UpdateOwnUserProfileInput): Promise<UserProfile>;
 }
 
 export interface OnboardingProfile {
@@ -42,6 +47,19 @@ export interface OnboardingProfile {
   readonly email: string;
   readonly phone?: string;
   readonly status: UserProfile["status"];
+  readonly version: number;
+}
+
+export interface OwnProfileView {
+  readonly displayName: string;
+  readonly email: string;
+  readonly emailNotificationsEnabled: boolean;
+  readonly joinedAt: string;
+  readonly onboardingCompleted: boolean;
+  readonly phone?: string;
+  readonly roles: UserProfile["roles"];
+  readonly status: UserProfile["status"];
+  readonly updatedAt: string;
   readonly version: number;
 }
 
@@ -66,6 +84,19 @@ const toOnboardingProfile = (profile: UserProfile): OnboardingProfile => ({
   email: profile.email,
   ...(profile.phone === undefined ? {} : { phone: profile.phone }),
   status: profile.status,
+  version: profile.version,
+});
+
+const toOwnProfile = (profile: UserProfile): OwnProfileView => ({
+  displayName: profile.displayName,
+  email: profile.email,
+  emailNotificationsEnabled: profile.emailNotificationsEnabled ?? true,
+  joinedAt: profile.createdAt,
+  onboardingCompleted: profile.onboardingCompletedAt !== undefined,
+  ...(profile.phone === undefined ? {} : { phone: profile.phone }),
+  roles: profile.roles,
+  status: profile.status,
+  updatedAt: profile.updatedAt,
   version: profile.version,
 });
 
@@ -205,6 +236,54 @@ export class AuthService {
         }
       }
       throw new ApiError(502, apiErrorCodes.internalError, "No fue posible guardar el perfil.");
+    }
+  }
+
+  async getOwnProfile(request: Request): Promise<OwnProfileView> {
+    const profile = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(profile.id, "profile-read"), 60);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(profile))
+        .ownUserId("PROFILE_READ_OWN");
+      return toOwnProfile(profile);
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      throw error;
+    }
+  }
+
+  async updateOwnProfile(
+    request: Request,
+    input: UpdateOwnProfileInput,
+  ): Promise<OwnProfileView> {
+    this.assertSameOrigin(request);
+    const profile = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(profile.id, "profile-write"), 20);
+    try {
+      const scope = new AuthorizedRepositoryScope(principalFromProfile(profile));
+      return toOwnProfile(await scope.mutateOwn(
+        "PROFILE_UPDATE_OWN",
+        (userId) => this.dependencies.users.updateOwn({
+          ...input,
+          updatedAt: this.clock().toISOString(),
+          userId,
+        }),
+      ));
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof DynamoDbRepositoryError) {
+        if (
+          error.code === "USER_VERSION_CONFLICT" ||
+          error.code === "USER_ONBOARDING_INCOMPLETE"
+        ) {
+          throw new ApiError(
+            409,
+            apiErrorCodes.conflict,
+            "El perfil cambió o todavía no está completo. Actualiza la página.",
+          );
+        }
+      }
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible actualizar el perfil.");
     }
   }
 

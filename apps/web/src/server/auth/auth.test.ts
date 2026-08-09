@@ -6,7 +6,10 @@ import {
 } from "jose";
 import type { CreatePendingUserResult } from "@gym-adr/data-access";
 import type { UserProfile } from "@gym-adr/domain";
-import { validateCompleteProfile } from "@gym-adr/validation";
+import {
+  validateCompleteProfile,
+  validateUpdateOwnProfile,
+} from "@gym-adr/validation";
 import { describe, expect, it, vi } from "vitest";
 
 import { resolveAuthConfig, type AuthConfig } from "./auth-config";
@@ -112,6 +115,20 @@ describe("OAuth session service", () => {
       findByCognitoSub: vi.fn(async (sub) => {
         const stored = users.get(sub);
         return stored === undefined ? undefined : toProfile(stored);
+      }),
+      updateOwn: vi.fn(async (input) => {
+        const stored = [...users.values()].find((entry) => entry.userId === input.userId);
+        if (stored === undefined) throw new Error("missing test user");
+        const profile: UserProfile = {
+          ...toProfile(stored),
+          displayName: input.displayName,
+          emailNotificationsEnabled: input.emailNotificationsEnabled,
+          phone: input.phone,
+          updatedAt: input.updatedAt,
+          version: input.expectedVersion + 1,
+        };
+        completed.set(input.userId, profile);
+        return profile;
       }),
     };
     const tokens: CognitoTokenPort = {
@@ -247,6 +264,141 @@ describe("OAuth session service", () => {
     expect(keys[0]).not.toContain("owned-user");
   });
 
+  it.each(["STUDENT", "STAFF", "ADMIN"] as const)(
+    "reads and updates only the authenticated %s profile",
+    async (role) => {
+      const { completed, service, userPort } = setup();
+      const stored = {
+        ...identity,
+        createdAt: "2026-08-08T12:00:00.000Z",
+        userId: "owned-user",
+      };
+      await userPort.createPending(stored);
+      completed.set(stored.userId, {
+        createdAt: stored.createdAt,
+        displayName: stored.displayName,
+        email: stored.email,
+        emailVerified: true,
+        id: stored.userId,
+        onboardingCompletedAt: "2026-08-08T12:10:00.000Z",
+        phone: "+595981123456",
+        roles: [role],
+        status: "ACTIVE",
+        updatedAt: "2026-08-08T12:10:00.000Z",
+        version: 2,
+      });
+      const readRequest = new Request("https://app.example.com/api/v1/me/profile", {
+        headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token` },
+      });
+      await expect(service.getOwnProfile(readRequest)).resolves.toMatchObject({
+        email: stored.email,
+        roles: [role],
+        status: "ACTIVE",
+      });
+      const updateRequest = new Request("https://app.example.com/api/v1/me/profile", {
+        headers: {
+          cookie: `${sessionCookieName(config.environment)}=signed-id-token`,
+          origin: config.appBaseUrl,
+        },
+        method: "PATCH",
+      });
+      await expect(service.updateOwnProfile(updateRequest, {
+        displayName: "María Benítez",
+        emailNotificationsEnabled: false,
+        expectedVersion: 2,
+        phone: "+595981999999",
+      })).resolves.toMatchObject({
+        displayName: "María Benítez",
+        emailNotificationsEnabled: false,
+        roles: [role],
+        status: "ACTIVE",
+        version: 3,
+      });
+      expect(userPort.updateOwn).toHaveBeenCalledWith(expect.objectContaining({
+        userId: "owned-user",
+      }));
+    },
+  );
+
+  it.each(["PENDING", "SUSPENDED", "INACTIVE"] as const)(
+    "allows the approved own-profile fields for a %s account",
+    async (status) => {
+      const { completed, service, userPort } = setup();
+      const stored = {
+        ...identity,
+        createdAt: "2026-08-08T12:00:00.000Z",
+        userId: "owned-user",
+      };
+      await userPort.createPending(stored);
+      completed.set(stored.userId, {
+        createdAt: stored.createdAt,
+        displayName: stored.displayName,
+        email: stored.email,
+        emailVerified: true,
+        id: stored.userId,
+        onboardingCompletedAt: "2026-08-08T12:10:00.000Z",
+        phone: "+595981123456",
+        roles: ["STUDENT"],
+        status,
+        updatedAt: "2026-08-08T12:10:00.000Z",
+        version: 2,
+      });
+      const request = new Request("https://app.example.com/api/v1/me/profile", {
+        headers: {
+          cookie: `${sessionCookieName(config.environment)}=signed-id-token`,
+          origin: config.appBaseUrl,
+        },
+        method: "PATCH",
+      });
+      await expect(service.updateOwnProfile(request, {
+        displayName: "María Benítez",
+        emailNotificationsEnabled: true,
+        expectedVersion: 2,
+        phone: "+595981999999",
+      })).resolves.toMatchObject({ status });
+    },
+  );
+
+  it("denies own-profile access without a session and updates for rejected accounts", async () => {
+    const { completed, service, userPort } = setup();
+    await expect(service.getOwnProfile(new Request("https://app.example.com/api/v1/me/profile")))
+      .rejects.toMatchObject({ code: "AUTHENTICATION_REQUIRED", status: 401 });
+
+    const stored = {
+      ...identity,
+      createdAt: "2026-08-08T12:00:00.000Z",
+      userId: "owned-user",
+    };
+    await userPort.createPending(stored);
+    completed.set(stored.userId, {
+      createdAt: stored.createdAt,
+      displayName: stored.displayName,
+      email: stored.email,
+      emailVerified: true,
+      id: stored.userId,
+      onboardingCompletedAt: "2026-08-08T12:10:00.000Z",
+      phone: "+595981123456",
+      roles: ["ADMIN"],
+      status: "REJECTED",
+      updatedAt: "2026-08-08T12:10:00.000Z",
+      version: 2,
+    });
+    const request = new Request("https://app.example.com/api/v1/me/profile", {
+      headers: {
+        cookie: `${sessionCookieName(config.environment)}=signed-id-token`,
+        origin: config.appBaseUrl,
+      },
+      method: "PATCH",
+    });
+    await expect(service.updateOwnProfile(request, {
+      displayName: "Nombre rechazado",
+      emailNotificationsEnabled: false,
+      expectedVersion: 2,
+      phone: "+595981999999",
+    })).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+    expect(userPort.updateOwn).not.toHaveBeenCalled();
+  });
+
   it.each(["ACTIVE", "SUSPENDED", "REJECTED", "INACTIVE"] as const)(
     "rejects profile completion for a %s account",
     async (status) => {
@@ -314,6 +466,32 @@ describe("onboarding validation", () => {
       role: "ADMIN",
       userId: "another-user",
     })).toMatchObject({ success: false });
+  });
+
+  it("accepts only own editable fields and rejects horizontal or protected fields", () => {
+    expect(validateUpdateOwnProfile({
+      displayName: "  María   Benítez ",
+      emailNotificationsEnabled: false,
+      expectedVersion: 2,
+      phone: "0981 999-999",
+    })).toEqual({
+      data: {
+        displayName: "María Benítez",
+        emailNotificationsEnabled: false,
+        expectedVersion: 2,
+        phone: "+595981999999",
+      },
+      success: true,
+    });
+    for (const protectedField of ["userId", "roles", "status", "email", "joinedAt"]) {
+      expect(validateUpdateOwnProfile({
+        displayName: "María Benítez",
+        emailNotificationsEnabled: true,
+        expectedVersion: 2,
+        phone: "+595981999999",
+        [protectedField]: protectedField === "userId" ? "another-user" : "forbidden",
+      })).toMatchObject({ success: false });
+    }
   });
 });
 

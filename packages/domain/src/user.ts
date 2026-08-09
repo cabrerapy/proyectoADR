@@ -19,6 +19,7 @@ export interface UserProfile {
   readonly createdAt: string;
   readonly displayName: string;
   readonly email: string;
+  readonly emailNotificationsEnabled?: boolean;
   readonly emailVerified: boolean;
   readonly onboardingCompletedAt?: string;
   readonly phone?: string;

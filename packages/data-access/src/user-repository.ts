@@ -51,11 +51,22 @@ export interface CompletePendingProfileInput {
   readonly userId: string;
 }
 
+export interface UpdateOwnUserProfileInput {
+  readonly displayName: string;
+  readonly emailNotificationsEnabled: boolean;
+  readonly expectedVersion: number;
+  readonly phone: string;
+  readonly updatedAt: string;
+  readonly userId: string;
+}
+
 export interface UpdateUserProfileInput {
   readonly displayName: string;
   readonly email: string;
+  readonly emailNotificationsEnabled?: boolean;
   readonly emailVerified: boolean;
   readonly expectedVersion: number;
+  readonly phone?: string;
   readonly roles: readonly UserRole[];
   readonly status: UserStatus;
   readonly updatedAt: string;
@@ -73,6 +84,7 @@ interface UserProfileItem extends DynamoDbItem {
   readonly createdAt: string;
   readonly displayName: string;
   readonly email: string;
+  readonly emailNotificationsEnabled?: boolean;
   readonly emailVerified: boolean;
   readonly entityType: "UserProfile";
   readonly onboardingCompletedAt?: string;
@@ -97,6 +109,7 @@ const tableNamePattern = /^[A-Za-z0-9_.-]{3,255}$/u;
 const userError = (
   code:
     | "USER_EMAIL_CONFLICT"
+    | "USER_ONBOARDING_INCOMPLETE"
     | "USER_ONBOARDING_COMPLETE"
     | "USER_RECORD_INVALID"
     | "USER_STATUS_INVALID"
@@ -222,6 +235,7 @@ export class UserRepository {
       createdAt,
       displayName,
       email,
+      emailNotificationsEnabled: true,
       emailVerified: true,
       entityType: "UserProfile",
       roles: ["STUDENT"],
@@ -399,6 +413,35 @@ export class UserRepository {
       searchTokenVersions: this.searchTokens.versions,
       updatedAt: completedAt,
       version: nextVersion,
+    });
+  }
+
+  async updateOwn(input: UpdateOwnUserProfileInput): Promise<UserProfile> {
+    const current = await this.getById(input.userId, true);
+    if (current === undefined) {
+      throw new DynamoDbRepositoryError(
+        "RESOURCE_NOT_FOUND",
+        "El perfil solicitado no existe.",
+      );
+    }
+    if (current.onboardingCompletedAt === undefined || current.phone === undefined) {
+      throw userError(
+        "USER_ONBOARDING_INCOMPLETE",
+        "El perfil inicial debe completarse antes de editarlo.",
+      );
+    }
+
+    return this.update({
+      displayName: input.displayName,
+      email: current.email,
+      emailNotificationsEnabled: input.emailNotificationsEnabled,
+      emailVerified: current.emailVerified,
+      expectedVersion: input.expectedVersion,
+      phone: input.phone,
+      roles: current.roles,
+      status: current.status,
+      updatedAt: input.updatedAt,
+      userId: input.userId,
     });
   }
 
@@ -584,6 +627,9 @@ export class UserRepository {
     }
     const email = verifiedEmail(input.email, input.emailVerified);
     const displayName = storedDisplayName(input.displayName);
+    const emailNotificationsEnabled = input.emailNotificationsEnabled ??
+      current.emailNotificationsEnabled ?? true;
+    const phone = input.phone === undefined ? current.phone : storedPhone(input.phone);
     const nextRoles = roles(input.roles);
     const nextVersion = input.expectedVersion + 1;
     if (!Number.isSafeInteger(nextVersion)) {
@@ -617,6 +663,7 @@ export class UserRepository {
           ExpressionAttributeNames: {
             "#displayName": "displayName",
             "#email": "email",
+            "#emailNotificationsEnabled": "emailNotificationsEnabled",
             "#emailVerified": "emailVerified",
             "#gsi1pk": "GSI1PK",
             "#gsi1sk": "GSI1SK",
@@ -626,10 +673,12 @@ export class UserRepository {
             "#status": "status",
             "#updatedAt": "updatedAt",
             "#version": "version",
+            ...(phone === undefined ? {} : { "#phone": "phone" }),
           },
           ExpressionAttributeValues: {
             ":displayName": displayName,
             ":email": email,
+            ":emailNotificationsEnabled": emailNotificationsEnabled,
             ":emailVerified": true,
             ":expectedVersion": input.expectedVersion,
             ":gsi1pk": index.PK,
@@ -639,11 +688,12 @@ export class UserRepository {
             ":searchTokenVersions": this.searchTokens.versions,
             ":status": input.status,
             ":updatedAt": updatedAt,
+            ...(phone === undefined ? {} : { ":phone": phone }),
           },
           Key: this.safeProfileKey(input.userId),
           TableName: this.tableName,
           UpdateExpression:
-            "SET #displayName = :displayName, #email = :email, #emailVerified = :emailVerified, #roles = :roles, #status = :status, #updatedAt = :updatedAt, #version = :nextVersion, #searchTokenVersions = :searchTokenVersions, #gsi1pk = :gsi1pk, #gsi1sk = :gsi1sk",
+            `SET #displayName = :displayName, #email = :email, #emailNotificationsEnabled = :emailNotificationsEnabled, #emailVerified = :emailVerified, #roles = :roles, #status = :status, #updatedAt = :updatedAt, #version = :nextVersion, #searchTokenVersions = :searchTokenVersions, #gsi1pk = :gsi1pk, #gsi1sk = :gsi1sk${phone === undefined ? "" : ", #phone = :phone"}`,
         },
       },
       ...[...previousLookups]
@@ -691,12 +741,13 @@ export class UserRepository {
       createdAt: current.createdAt,
       displayName,
       email,
+      emailNotificationsEnabled,
       emailVerified: true,
       id: input.userId,
       ...(current.onboardingCompletedAt === undefined
         ? {}
         : { onboardingCompletedAt: current.onboardingCompletedAt }),
-      ...(current.phone === undefined ? {} : { phone: current.phone }),
+      ...(phone === undefined ? {} : { phone }),
       roles: nextRoles,
       status: input.status,
       updatedAt,
@@ -873,6 +924,8 @@ export class UserRepository {
       typeof item.updatedAt !== "string" ||
       typeof item.displayName !== "string" ||
       typeof item.email !== "string" ||
+      (item.emailNotificationsEnabled !== undefined &&
+        typeof item.emailNotificationsEnabled !== "boolean") ||
       item.emailVerified !== true ||
       (item.onboardingCompletedAt !== undefined && typeof item.onboardingCompletedAt !== "string") ||
       (item.phone !== undefined && typeof item.phone !== "string") ||
@@ -922,6 +975,7 @@ export class UserRepository {
         createdAt: item.createdAt,
         displayName: item.displayName,
         email: item.email,
+        emailNotificationsEnabled: item.emailNotificationsEnabled ?? true,
         emailVerified: true,
         entityType: "UserProfile",
         ...(item.onboardingCompletedAt === undefined
@@ -968,6 +1022,7 @@ export class UserRepository {
       createdAt: item.createdAt,
       displayName: item.displayName,
       email: item.email,
+      emailNotificationsEnabled: item.emailNotificationsEnabled ?? true,
       emailVerified: item.emailVerified,
       id: item.userId,
       ...(item.onboardingCompletedAt === undefined

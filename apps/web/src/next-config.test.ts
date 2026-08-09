@@ -24,5 +24,6 @@ describe("Next.js public delivery configuration", () => {
     expect(cacheValue("/galeria")).toContain("stale-while-revalidate=86400");
     expect(cacheValue("/api/:path*")).toBeUndefined();
     expect(cacheValue("/onboarding")).toBe("private, no-store, max-age=0");
+    expect(cacheValue("/me/:path*")).toBe("private, no-store, max-age=0");
   });
 });

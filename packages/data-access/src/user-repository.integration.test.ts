@@ -191,4 +191,55 @@ describe.skipIf(!enabled)("UserRepository with DynamoDB Local", () => {
       status: "rejected",
     });
   });
+
+  it("updates only own editable fields with one winner under concurrency", async () => {
+    const ownUser = {
+      ...pendingUser,
+      cognitoSub: "google-subject-own-profile",
+      email: "own-profile@example.com",
+      userId: "user-own-profile",
+    };
+    await repository.createPending(ownUser);
+    await repository.completePendingProfile({
+      displayName: "Luis Ramírez",
+      expectedVersion: 1,
+      onboardingCompletedAt: "2026-08-08T12:20:00Z",
+      phone: "+595981111111",
+      userId: ownUser.userId,
+    });
+
+    const results = await Promise.allSettled([
+      repository.updateOwn({
+        displayName: "Luis Alberto Ramírez",
+        emailNotificationsEnabled: false,
+        expectedVersion: 2,
+        phone: "+595981222222",
+        updatedAt: "2026-08-08T13:00:00Z",
+        userId: ownUser.userId,
+      }),
+      repository.updateOwn({
+        displayName: "Luis A. Ramírez",
+        emailNotificationsEnabled: true,
+        expectedVersion: 2,
+        phone: "+595981333333",
+        updatedAt: "2026-08-08T13:00:01Z",
+        userId: ownUser.userId,
+      }),
+    ]);
+
+    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    expect(results.find(({ status }) => status === "rejected")).toMatchObject({
+      reason: { code: "USER_VERSION_CONFLICT" },
+      status: "rejected",
+    });
+    const stored = await repository.findByCognitoSub(ownUser.cognitoSub);
+    expect(stored).toMatchObject({
+      email: ownUser.email,
+      id: ownUser.userId,
+      roles: ["STUDENT"],
+      status: "PENDING",
+      version: 3,
+    });
+    expect(stored?.phone).not.toBe("+595981111111");
+  });
 });
