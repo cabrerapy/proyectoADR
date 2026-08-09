@@ -4,6 +4,7 @@ export interface DomainEntity {
   readonly id: EntityId;
 }
 
+export * from "./authorization";
 export * from "./financial";
 export * from "./operations";
 export * from "./scheduling";

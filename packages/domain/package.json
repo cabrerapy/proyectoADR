@@ -10,9 +10,13 @@
     }
   },
   "scripts": {
+    "test": "vitest run",
     "typecheck": "tsc --project tsconfig.json --noEmit"
   },
   "dependencies": {
     "@gym-adr/shared": "0.1.0"
+  },
+  "devDependencies": {
+    "vitest": "4.1.10"
   }
 }
