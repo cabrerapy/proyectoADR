@@ -26,12 +26,13 @@ const requireNpmCli = () => {
   return npmCli;
 };
 
-const runOpenNext = (cwd) => {
+const runOpenNext = (cwd, environment = process.env) => {
   const result = spawnSync(
     process.execPath,
     [requireNpmCli(), "run", "build:serverless:direct"],
     {
       cwd,
+      env: environment,
       stdio: "inherit",
       windowsHide: true,
     },
@@ -147,6 +148,16 @@ if (process.platform !== "win32") {
   try {
     const status = runOpenNext(
       path.win32.join(`${drive}\\`, relativeWebRoot),
+      {
+        ...process.env,
+        NODE_OPTIONS: [
+          process.env.NODE_OPTIONS,
+          "--preserve-symlinks",
+          "--preserve-symlinks-main",
+        ].filter(Boolean).join(" "),
+        OPEN_NEXT_MONOREPO_ROOT: `${drive}\\`,
+        OPEN_NEXT_REAL_MONOREPO_ROOT: repositoryRoot,
+      },
     );
     if (status === 0) {
       ensureImageDependencies();

@@ -49,6 +49,10 @@ test("TASK-008 uses standalone output without OpenNext persistence", async () =>
   );
 
   assert.match(nextConfig, /output: "standalone"/);
+  assert.match(nextConfig, /OPEN_NEXT_MONOREPO_ROOT/);
+  assert.match(nextConfig, /transpilePackages/);
+  assert.match(nextConfig, /@gym-adr\/data-access/);
+  assert.match(openNextConfig, /build-next-for-opennext\.mjs/);
   assert.match(nextConfig, /poweredByHeader: false/);
   assert.match(openNextConfig, /disableIncrementalCache: true/);
   assert.match(openNextConfig, /disableTagCache: true/);
@@ -65,6 +69,16 @@ test("TASK-008 confines the Windows OpenNext build to the repository", async () 
   assert.match(buildScript, /spawnSync\(\s*process\.execPath/);
   assert.match(buildScript, /execFileSync\("subst\.exe"/);
   assert.match(buildScript, /path\.relative\(repositoryRoot, webRoot\)/);
+  assert.match(buildScript, /OPEN_NEXT_MONOREPO_ROOT/);
+  assert.match(buildScript, /OPEN_NEXT_REAL_MONOREPO_ROOT/);
+  assert.match(buildScript, /--preserve-symlinks/);
+  const tracingScript = await readFile(
+    path.join(webRoot, "scripts/build-next-for-opennext.mjs"),
+    "utf8",
+  );
+  assert.match(tracingScript, /\.nft\.json/);
+  assert.match(tracingScript, /path\.relative/);
+  assert.match(tracingScript, /OPEN_NEXT_MONOREPO_ROOT/);
   assert.match(buildScript, /sharp@0\.32\.6/);
   assert.match(buildScript, /npm_config_platform: "linux"/);
   assert.match(buildScript, /npm_config_arch: "arm64"/);
