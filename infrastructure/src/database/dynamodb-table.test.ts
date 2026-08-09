@@ -133,7 +133,7 @@ describe("DynamoDB table", () => {
     });
   });
 
-  it("applies mandatory cost-allocation tags without adding DynamoDB IAM grants", () => {
+  it("applies mandatory tags and grants only callback DynamoDB operations", () => {
     const template = synthesize("development");
     template.hasResourceProperties("AWS::DynamoDB::Table", {
       Tags: Match.arrayWith([
@@ -152,6 +152,10 @@ describe("DynamoDB table", () => {
     const policies = Object.values(resources).filter(
       (resource) => resource.Type === "AWS::IAM::Policy",
     );
-    expect(JSON.stringify(policies)).not.toContain("dynamodb:");
+    const serialized = JSON.stringify(policies);
+    expect(serialized).toContain("dynamodb:GetItem");
+    expect(serialized).toContain("dynamodb:TransactWriteItems");
+    expect(serialized).not.toContain("dynamodb:*");
+    expect(serialized).not.toContain("dynamodb:Scan");
   });
 });

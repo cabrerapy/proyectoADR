@@ -126,7 +126,7 @@ describe("security foundation", () => {
     );
 
     expect(JSON.stringify(policies)).not.toContain('"Resource":"*"');
-    expect(JSON.stringify(policies)).not.toContain("dynamodb:");
+    expect(JSON.stringify(policies)).not.toContain("dynamodb:*");
   });
 
   it("applies mandatory cost-allocation tags", () => {

@@ -33,6 +33,8 @@ export interface CognitoAuthProps {
 const projectName = "gym-adr-platform";
 
 export class CognitoAuth extends Construct {
+  readonly appBaseUrl: string;
+  readonly callbackUrl: string;
   readonly client: UserPoolClient;
   readonly domain: UserPoolDomain;
   readonly userPool: UserPool;
@@ -46,6 +48,8 @@ export class CognitoAuth extends Construct {
       props.webBaseUrl,
     );
     const retain = environmentConfig.name === "production";
+    this.appBaseUrl = authConfig.logoutUrls[0] ?? props.webBaseUrl;
+    this.callbackUrl = authConfig.callbackUrls[0] ?? `${props.webBaseUrl}/api/auth/callback/cognito`;
 
     this.userPool = new UserPool(this, "UserPool", {
       accountRecovery: AccountRecovery.NONE,

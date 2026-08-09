@@ -129,9 +129,13 @@ describe("OpenNext web hosting", () => {
     });
   });
 
-  it("does not grant DynamoDB access to the hosting roles", () => {
+  it("grants the server only the DynamoDB operations required by auth", () => {
     const template = synthesize().toJSON();
+    const serialized = JSON.stringify(template);
 
-    expect(JSON.stringify(template)).not.toContain("dynamodb:");
+    expect(serialized).toContain("dynamodb:GetItem");
+    expect(serialized).toContain("dynamodb:TransactWriteItems");
+    expect(serialized).not.toContain("dynamodb:*");
+    expect(serialized).not.toContain("dynamodb:Scan");
   });
 });

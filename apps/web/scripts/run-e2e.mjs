@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -14,6 +15,19 @@ const serverUrl = "http://127.0.0.1:3100";
 const run = (command, args) =>
   spawn(command, args, {
     cwd: webRoot,
+    env: {
+      ...process.env,
+      APP_BASE_URL: "http://localhost:3100",
+      APP_ENVIRONMENT: "local",
+      AWS_REGION: "us-east-1",
+      COGNITO_CLIENT_ID: "local-client",
+      COGNITO_HOSTED_UI_BASE_URL: "https://gym-local.auth.us-east-1.amazoncognito.com",
+      COGNITO_REDIRECT_URI: "http://localhost:3000/api/auth/callback/cognito",
+      COGNITO_USER_POOL_ID: "us-east-1_Local",
+      DYNAMODB_ENDPOINT: "http://127.0.0.1:8000",
+      DYNAMODB_TABLE_NAME: "gym-adr-platform-local",
+      SEARCH_TOKEN_HMAC_KEY: randomBytes(32).toString("base64url"),
+    },
     stdio: "inherit",
     windowsHide: true,
   });

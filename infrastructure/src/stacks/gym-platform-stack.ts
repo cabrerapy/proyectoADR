@@ -1,4 +1,6 @@
-import { Stack, type StackProps } from "aws-cdk-lib";
+import { ArnFormat, Stack, type StackProps } from "aws-cdk-lib";
+import { PolicyStatement } from "aws-cdk-lib/aws-iam";
+import { StringParameter } from "aws-cdk-lib/aws-ssm";
 import type { Construct } from "constructs";
 
 import { CognitoAuth } from "../auth/cognito-auth.js";
@@ -50,5 +52,63 @@ export class GymPlatformStack extends Stack {
       environmentConfig: props.environmentConfig,
       webBaseUrl: `https://${this.webHosting.distribution.distributionDomainName}`,
     });
+
+    const authParameterPrefix = `/gym-adr-platform/${props.environmentConfig.name}/auth`;
+    const authParameterNames = [
+      `${authParameterPrefix}/app-base-url`,
+      `${authParameterPrefix}/client-id`,
+      `${authParameterPrefix}/hosted-ui-base-url`,
+      `${authParameterPrefix}/redirect-uri`,
+      `${authParameterPrefix}/user-pool-id`,
+    ] as const;
+    const authParameterDefinitions: readonly (readonly [string, string, string])[] = [
+      ["AuthAppBaseUrl", authParameterNames[0], this.cognitoAuth.appBaseUrl],
+      ["AuthClientId", authParameterNames[1], this.cognitoAuth.client.userPoolClientId],
+      ["AuthHostedUiBaseUrl", authParameterNames[2], this.cognitoAuth.domain.baseUrl()],
+      ["AuthRedirectUri", authParameterNames[3], this.cognitoAuth.callbackUrl],
+      ["AuthUserPoolId", authParameterNames[4], this.cognitoAuth.userPool.userPoolId],
+    ];
+    authParameterDefinitions.forEach(([id, parameterName, stringValue]) => {
+      new StringParameter(this, id, { parameterName, stringValue });
+    });
+
+    this.webHosting.serverFunction.addEnvironment(
+      "APP_ENVIRONMENT",
+      props.environmentConfig.name,
+    );
+    this.webHosting.serverFunction.addEnvironment(
+      "AUTH_CONFIG_PARAMETER_PREFIX",
+      authParameterPrefix,
+    );
+    this.webHosting.serverFunction.addEnvironment(
+      "DYNAMODB_TABLE_NAME",
+      this.dynamoDbTable.table.tableName,
+    );
+    this.webHosting.serverFunction.addEnvironment(
+      "SEARCH_TOKEN_SECRET_ARN",
+      this.securityFoundation.searchTokenSecret.secretArn,
+    );
+    this.webHosting.serverFunction.addToRolePolicy(
+      new PolicyStatement({
+        actions: ["dynamodb:GetItem", "dynamodb:TransactWriteItems"],
+        resources: [this.dynamoDbTable.table.tableArn],
+      }),
+    );
+    this.securityFoundation.searchTokenSecret.grantRead(
+      this.securityFoundation.applicationRuntimeRole,
+    );
+    this.webHosting.serverFunction.addToRolePolicy(
+      new PolicyStatement({
+        actions: ["ssm:GetParameters"],
+        resources: authParameterNames.map((parameterName) =>
+          Stack.of(this).formatArn({
+            arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+            resource: "parameter",
+            resourceName: parameterName.replace(/^\//u, ""),
+            service: "ssm",
+          })
+        ),
+      }),
+    );
   }
 }

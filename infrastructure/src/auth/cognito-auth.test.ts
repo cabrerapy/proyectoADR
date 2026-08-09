@@ -128,7 +128,7 @@ describe("Cognito social authentication", () => {
       ProviderName: "Facebook",
       ProviderType: "Facebook",
     });
-    template.resourceCountIs("AWS::SecretsManager::Secret", 0);
+    template.resourceCountIs("AWS::SecretsManager::Secret", 1);
     const serialized = JSON.stringify(template.toJSON());
     expect(serialized).toContain(
       "gym-adr-platform/development/cognito/google",
@@ -141,6 +141,27 @@ describe("Cognito social authentication", () => {
     expect(serialized).not.toContain("example-client-secret");
     expect(serialized).not.toContain("ALLOW_USER_PASSWORD_AUTH");
     expect(serialized).not.toContain("ALLOW_USER_SRP_AUTH");
+  });
+
+  it("connects the server through SSM and least-privilege data permissions", () => {
+    const template = synthesize("development");
+
+    template.resourceCountIs("AWS::SSM::Parameter", 5);
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Environment: {
+        Variables: Match.objectLike({
+          APP_ENVIRONMENT: "development",
+          AUTH_CONFIG_PARAMETER_PREFIX: "/gym-adr-platform/development/auth",
+        }),
+      },
+    });
+    const serialized = JSON.stringify(template.toJSON());
+    expect(serialized).toContain("dynamodb:GetItem");
+    expect(serialized).toContain("dynamodb:TransactWriteItems");
+    expect(serialized).toContain("secretsmanager:GetSecretValue");
+    expect(serialized).toContain("ssm:GetParameters");
+    expect(serialized).not.toContain("dynamodb:*");
+    expect(serialized).not.toContain('"Action":"*"');
   });
 
   it("uses loopback callbacks only for local and CloudFront HTTPS remotely", () => {

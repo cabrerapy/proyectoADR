@@ -16,6 +16,7 @@ import {
 import { Alias, Key } from "aws-cdk-lib/aws-kms";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import { Topic } from "aws-cdk-lib/aws-sns";
+import { Secret } from "aws-cdk-lib/aws-secretsmanager";
 import { Construct } from "constructs";
 
 import type { EnvironmentConfig } from "../config/environment.js";
@@ -38,6 +39,7 @@ export class SecurityFoundation extends Construct {
   readonly applicationRuntimeRole: Role;
   readonly encryptionKey: Key;
   readonly operationalAlertsTopic: Topic;
+  readonly searchTokenSecret: Secret;
 
   constructor(
     scope: Construct,
@@ -110,6 +112,17 @@ export class SecurityFoundation extends Construct {
     new Alias(this, "EncryptionKeyAlias", {
       aliasName: `alias/${projectName}/${environmentConfig.name}/foundation`,
       targetKey: this.encryptionKey,
+    });
+
+    this.searchTokenSecret = new Secret(this, "SearchTokenSecret", {
+      description: `HMAC key for private search tokens (${environmentConfig.name})`,
+      encryptionKey: this.encryptionKey,
+      generateSecretString: {
+        excludePunctuation: true,
+        passwordLength: 64,
+      },
+      removalPolicy,
+      secretName: `${projectName}/${environmentConfig.name}/search-token-hmac`,
     });
 
     this.applicationLogGroup = new LogGroup(this, "ApplicationLogGroup", {
