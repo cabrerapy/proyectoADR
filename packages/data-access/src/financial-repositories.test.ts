@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { DynamoDbDocumentPort } from "./dynamodb-adapter";
 import { MembershipRepository } from "./membership-repository";
+import { operationalIndexKeys, primaryKeys } from "./model-keys";
+import { shardForId } from "./model-shards";
 import { PaymentRepository } from "./payment-repository";
 
 const metadata = { httpStatusCode: 200 };
@@ -93,6 +95,59 @@ describe("financial repositories", () => {
       repository.create({ ...membershipInput, endDate: "2026-02-30" }),
     ).rejects.toMatchObject({ code: "INVALID_INPUT" });
     expect(port.transactWrite).not.toHaveBeenCalled();
+  });
+
+  it("paginates sharded membership reports without restarting exhausted shards and strongly revalidates", async () => {
+    const port = createPort();
+    const table = "gym-adr-platform-local";
+    const shard = shardForId(membershipInput.membershipId);
+    const index = operationalIndexKeys.membershipDue(
+      membershipInput.endDate,
+      shard,
+      membershipInput.membershipId,
+    );
+    const canonicalKey = primaryKeys.membership(
+      membershipInput.userId,
+      membershipInput.startDate,
+      membershipInput.membershipId,
+    );
+    const viewKey = primaryKeys.view(
+      "Membership",
+      membershipInput.membershipId,
+      "DUE",
+      membershipInput.userId,
+    );
+    const cursor = { ...viewKey, GSI1PK: index.PK, GSI1SK: index.SK };
+    vi.mocked(port.query).mockImplementation(async (input) => ({
+      $metadata: metadata,
+      ...(input.ExpressionAttributeValues?.[":partitionValue"] === index.PK
+        ? { Items: [{ ...cursor, canonicalPK: canonicalKey.PK, canonicalSK: canonicalKey.SK, createdAt: membershipInput.createdAt, entityType: "View", purpose: "DUE", schemaVersion: 1, targetType: "Membership", updatedAt: membershipInput.createdAt }], LastEvaluatedKey: cursor }
+        : { Items: [] }),
+    }));
+    vi.mocked(port.batchGet).mockImplementation(async (input) => {
+      const keys = input.RequestItems?.[table]?.Keys ?? [];
+      const wantsView = keys[0]?.PK === viewKey.PK;
+      return {
+        $metadata: metadata,
+        Responses: {
+          [table]: wantsView
+            ? [{ ...cursor, canonicalPK: canonicalKey.PK, canonicalSK: canonicalKey.SK, createdAt: membershipInput.createdAt, entityType: "View", purpose: "DUE", schemaVersion: 1, targetType: "Membership", updatedAt: membershipInput.createdAt }]
+            : [{ ...canonicalKey, createdAt: membershipInput.createdAt, createdBy: membershipInput.createdBy, currency: membershipInput.currency, endDate: membershipInput.endDate, entityType: "Membership", expectedAmount: membershipInput.expectedAmount, frequency: membershipInput.frequency, membershipId: membershipInput.membershipId, planId: membershipInput.planId, planName: membershipInput.planName, schemaVersion: 1, startDate: membershipInput.startDate, status: membershipInput.status, updatedAt: membershipInput.createdAt, userId: membershipInput.userId, version: 1 }],
+        },
+      };
+    });
+    const repository = new MembershipRepository(port, table);
+    const first = await repository.listDue(membershipInput.endDate, { limitPerShard: 1 });
+    expect(first).toMatchObject({ memberships: [{ id: membershipInput.membershipId }] });
+    expect(first.cursors).toEqual(expect.objectContaining({ [shard]: cursor }));
+    expect(Object.values(first.cursors ?? {}).filter((value) => value === null)).toHaveLength(3);
+    expect(vi.mocked(port.batchGet).mock.calls.every(([input]) => input.RequestItems?.[table]?.ConsistentRead === true)).toBe(true);
+
+    if (first.cursors === undefined) throw new Error("missing membership cursors");
+    vi.mocked(port.query).mockResolvedValue({ $metadata: metadata, Items: [] });
+    await expect(repository.listDue(membershipInput.endDate, { cursors: first.cursors, limitPerShard: 1 }))
+      .resolves.toEqual({ memberships: [] });
+    expect(port.query).toHaveBeenCalledTimes(5);
   });
 
   it("records canonical payment, two views, references, and idempotency atomically", async () => {

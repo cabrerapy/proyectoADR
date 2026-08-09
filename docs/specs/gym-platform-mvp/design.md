@@ -241,6 +241,7 @@ JSON bajo `/api/v1`, paginación por cursor opaco y error `{ code, message, corr
 | `GET/PATCH /admin/students/{id}` | rol autorizado | Consulta/transición auditada |
 | `GET/POST /admin/plans`, `GET/PATCH /admin/plans/{id}` | STAFF lectura; ADMIN mutación | Catálogo por estado y CRUD lógico auditado |
 | `GET/POST /admin/memberships`, `PATCH /admin/memberships/{id}` | STAFF operativo; ADMIN estados | Historial por alumno y mutación transaccional auditada |
+| `GET /admin/membership-reports` | STAFF/ADMIN | Reporte paginado por vencimiento exacto o estado |
 | `POST /admin/payments` | STAFF/ADMIN | Pago y vistas materializadas transaccionales |
 | `POST /admin/payments/{id}/void` | ADMIN | Elemento de anulación/compensación, no borrado |
 | `POST/PATCH /admin/class-sessions` | STAFF/ADMIN | Sesión y claves de índices actualizadas |
@@ -270,6 +271,8 @@ Planes son plantillas canónicas en `PLAN#{id}/METADATA`. Cada plan activo o ina
 La membresía histórica congela plan, importe, moneda y frecuencia. Se crea en `PENDING`; las transiciones permitidas son `PENDING → ACTIVE/CANCELLED`, `ACTIVE → SUSPENDED/EXPIRED/CANCELLED` y `SUSPENDED → ACTIVE/EXPIRED/CANCELLED`. `EXPIRED` y `CANCELLED` son terminales. `STAFF` solo puede crear y editar datos operativos mientras está pendiente; `ADMIN` controla estados y los cambios sensibles exigen motivo.
 
 Activar/cambiar membresía actualiza transaccionalmente elemento histórico, puntero `MEMBERSHIP#ACTIVE`, vistas de vencimiento/estado e auditoría, condicionando versión, estado previo, alumno `ACTIVE/STUDENT` y unicidad del puntero. El puntero guarda `status`, fechas y días epoch para condiciones futuras de reserva. La vigencia se calcula con el día calendario de `America/Asuncion`: una membresía es vigente únicamente con estado `ACTIVE` y fecha local dentro del intervalo inclusivo; antes del inicio es próxima y después del vencimiento está en mora. La elegibilidad usa el puntero canónico con lectura/condición fuerte, no GSI.
+
+La vista propia deriva siempre el alumno de la sesión y consulta puntero e historial mediante `GetItem`/`Query` fuertes. Los reportes consultan cuatro shards de `MEMBERSHIP_DUE#{date}#Sx` o `MEMBERSHIP_STATUS#{status}#Sx`, resuelven vistas `KEYS_ONLY` y releen canónicos con `BatchGetItem` fuerte. Los cursores opacos contienen los cuatro estados de paginación, marcan shards agotados y están ligados al filtro original; nunca aceptan `userId` para la lectura propia ni reinician shards terminados.
 
 Registrar pago crea en una transacción: elemento canónico, vista por fecha, vista por estado, idempotencia y auditoría, tras `ConditionCheck` de membresía/alumno. Un pago `CONFIRMED` no se sobreescribe ni elimina. Anulación crea elemento `PAYMENT_CORRECTION#{timestamp}#{id}` que referencia al original y actualiza solo el estado permitido con condición; ajustes compensatorios son pagos separados enlazados. Toda vista se actualiza en la misma transacción.
 

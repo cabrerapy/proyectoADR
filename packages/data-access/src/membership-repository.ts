@@ -42,6 +42,10 @@ export type FinancialFanOutCursors = Readonly<
   Record<string, DynamoDbKey | undefined>
 >;
 
+export type MembershipFanOutCursors = Readonly<
+  Record<string, DynamoDbKey | null | undefined>
+>;
+
 export interface CreateMembershipInput {
   readonly auditId: string;
   readonly correlationId: string;
@@ -75,7 +79,7 @@ export interface UpdateMembershipInput {
 }
 
 export interface MembershipPage {
-  readonly cursors?: FinancialFanOutCursors;
+  readonly cursors?: MembershipFanOutCursors;
   readonly memberships: readonly Membership[];
 }
 
@@ -120,9 +124,6 @@ const itemKey = (item: DynamoDbItem): PrimaryKey => {
   }
   return { PK: item.PK, SK: item.SK };
 };
-
-const hasCursors = (cursors: FinancialFanOutCursors): boolean =>
-  Object.values(cursors).some((cursor) => cursor !== undefined);
 
 const putAbsent = (table: string, item: DynamoDbItem): TransactionAction => ({
   Put: {
@@ -376,7 +377,7 @@ export class MembershipRepository {
 
   async listDue(
     dueDate: string,
-    options: { readonly cursors?: FinancialFanOutCursors; readonly limitPerShard?: number } = {},
+    options: { readonly cursors?: MembershipFanOutCursors; readonly limitPerShard?: number } = {},
   ): Promise<MembershipPage> {
     const date = financialDate(dueDate, "dueDate");
     return this.listFromViews(
@@ -389,7 +390,7 @@ export class MembershipRepository {
 
   async listByStatus(
     status: MembershipStatus,
-    options: { readonly cursors?: FinancialFanOutCursors; readonly limitPerShard?: number } = {},
+    options: { readonly cursors?: MembershipFanOutCursors; readonly limitPerShard?: number } = {},
   ): Promise<MembershipPage> {
     if (!isMembershipStatus(status)) {
       throw invalidDynamoDbInput("El estado de membresía no es válido.");
@@ -496,25 +497,37 @@ export class MembershipRepository {
   private async listFromViews(
     partition: (shard: Shard) => string,
     purpose: "DUE" | "STATUS",
-    options: { readonly cursors?: FinancialFanOutCursors; readonly limitPerShard?: number },
+    options: { readonly cursors?: MembershipFanOutCursors; readonly limitPerShard?: number },
     matches: (membership: Membership) => boolean,
   ): Promise<MembershipPage> {
     const limit = options.limitPerShard ?? 25;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 25) {
       throw invalidDynamoDbInput("El límite por shard debe estar entre 1 y 25.");
     }
+    const expectedCursorKeys = [...SHARDS];
+    const receivedCursors = options.cursors;
+    if (receivedCursors !== undefined && (
+      Object.keys(receivedCursors).length !== expectedCursorKeys.length ||
+      expectedCursorKeys.some((key) => !(key in receivedCursors))
+    )) {
+      throw invalidDynamoDbInput("El cursor de membresías está incompleto.");
+    }
     const pages = await Promise.all(
-      SHARDS.map(async (shard) => ({
-        page: await this.base.queryPage({
-          ...(options.cursors?.[shard] === undefined
-            ? {}
-            : { cursor: options.cursors[shard] }),
-          indexName: "GSI1-Operational",
-          limit,
-          partitionValue: partition(shard),
-        }),
-        shard,
-      })),
+      SHARDS.map(async (shard) => {
+        const cursor = options.cursors?.[shard];
+        if (cursor === null) {
+          return { page: { items: [] as readonly DynamoDbItem[] }, shard };
+        }
+        return {
+          page: await this.base.queryPage({
+            ...(cursor === undefined ? {} : { cursor }),
+            indexName: "GSI1-Operational",
+            limit,
+            partitionValue: partition(shard),
+          }),
+          shard,
+        };
+      }),
     );
     const viewKeys = pages.flatMap(({ page }) => page.items.map(itemKey));
     const canonicalKeys = viewKeys.length === 0
@@ -530,11 +543,12 @@ export class MembershipRepository {
           .sort((left, right) =>
             left.endDate.localeCompare(right.endDate) || left.id.localeCompare(right.id)
           );
+    const hasNextPage = pages.some(({ page }) => page.nextCursor !== undefined);
     const cursors = Object.fromEntries(
-      pages.map(({ page, shard }) => [shard, page.nextCursor]),
+      pages.map(({ page, shard }) => [shard, page.nextCursor ?? null]),
     );
     return {
-      ...(hasCursors(cursors) ? { cursors } : {}),
+      ...(hasNextPage ? { cursors } : {}),
       memberships,
     };
   }

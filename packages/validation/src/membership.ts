@@ -25,6 +25,16 @@ export interface MembershipHistoryQuery {
   readonly userId: string;
 }
 
+export interface OwnMembershipQuery {
+  readonly cursor?: string;
+}
+
+export interface MembershipReportQuery {
+  readonly cursor?: string;
+  readonly filter: "due" | "status";
+  readonly value: MembershipStatusInput | string;
+}
+
 const issue = (path: string, message: string): ValidationIssue => ({
   code: "INVALID_MEMBERSHIP_FIELD",
   message,
@@ -50,6 +60,46 @@ const amount = (value: unknown): number | undefined =>
 
 const normalizedReason = (value: unknown): string | undefined =>
   typeof value === "string" ? value.trim().normalize("NFKC").replace(/\s+/gu, " ") : undefined;
+
+const cursor = (value: string | null): string | undefined =>
+  value !== null && value.length >= 1 && value.length <= 8_192 && /^[A-Za-z0-9_-]+$/u.test(value)
+    ? value
+    : undefined;
+
+export const validateOwnMembershipQuery = (
+  params: URLSearchParams,
+): ValidationResult<OwnMembershipQuery> => {
+  const issues: ValidationIssue[] = [...params.keys()].some((key) => key !== "cursor")
+    ? [issue("$", "La consulta incluye parámetros no permitidos.")]
+    : [];
+  const rawCursor = params.get("cursor");
+  const parsedCursor = cursor(rawCursor);
+  if (rawCursor !== null && parsedCursor === undefined) issues.push(issue("cursor", "El cursor no es válido."));
+  return finish(issues, parsedCursor === undefined ? {} : { cursor: parsedCursor });
+};
+
+export const validateMembershipReportQuery = (
+  params: URLSearchParams,
+): ValidationResult<MembershipReportQuery> => {
+  const issues: ValidationIssue[] = [...params.keys()].some(
+    (key) => key !== "cursor" && key !== "filter" && key !== "value",
+  ) ? [issue("$", "La consulta incluye parámetros no permitidos.")] : [];
+  const filter = params.get("filter");
+  const value = params.get("value") ?? "";
+  if (filter !== "due" && filter !== "status") issues.push(issue("filter", "Selecciona un reporte válido."));
+  if (filter === "due" && date(value) === undefined) issues.push(issue("value", "La fecha de vencimiento no es válida."));
+  if (filter === "status" && !STATUSES.some((candidate) => candidate === value)) {
+    issues.push(issue("value", "El estado de membresía no es válido."));
+  }
+  const rawCursor = params.get("cursor");
+  const parsedCursor = cursor(rawCursor);
+  if (rawCursor !== null && parsedCursor === undefined) issues.push(issue("cursor", "El cursor no es válido."));
+  return finish(issues, {
+    ...(parsedCursor === undefined ? {} : { cursor: parsedCursor }),
+    filter: filter === "status" ? "status" : "due",
+    value,
+  });
+};
 
 export const validateMembershipHistoryQuery = (
   params: URLSearchParams,

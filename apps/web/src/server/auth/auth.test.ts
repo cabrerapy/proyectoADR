@@ -11,6 +11,8 @@ import {
   validateCompleteProfile,
   validateCreateMembershipPlan,
   validateMembershipPlanQuery,
+  validateMembershipReportQuery,
+  validateOwnMembershipQuery,
   validateTransitionStudentStatus,
   validateUpdateMembershipPlan,
   validateUpdateOwnProfile,
@@ -240,6 +242,15 @@ describe("OAuth session service", () => {
           ? membership
           : undefined;
       }),
+      getActive: vi.fn(async (userId) => [...memberships.values()].find(
+        (membership) => membership.userId === userId && membership.status === "ACTIVE",
+      )),
+      listByStatus: vi.fn(async (status) => ({
+        memberships: [...memberships.values()].filter((membership) => membership.status === status),
+      })),
+      listDue: vi.fn(async (dueDate) => ({
+        memberships: [...memberships.values()].filter((membership) => membership.endDate === dueDate),
+      })),
       listHistory: vi.fn(async (userId) => ({
         memberships: [...memberships.values()].filter((membership) => membership.userId === userId),
       })),
@@ -934,6 +945,87 @@ describe("OAuth session service", () => {
       }
     }
   });
+
+  it("derives own membership queries from the verified session and rejects an IDOR cursor", async () => {
+    const { completed, membershipPort, memberships, service, userPort } = setup();
+    const actor = { ...identity, createdAt: "2026-08-08T12:00:00Z", userId: "student-own" };
+    await userPort.createPending(actor);
+    completed.set(actor.userId, {
+      createdAt: actor.createdAt, displayName: "Alumna", email: actor.email, emailVerified: true,
+      id: actor.userId, roles: ["STUDENT"], status: "ACTIVE", updatedAt: actor.createdAt, version: 2,
+    });
+    const own: Membership = {
+      createdAt: actor.createdAt, createdBy: "admin", currency: "PYG", endDate: "2026-09-08",
+      expectedAmount: 250_000, frequency: "MONTHLY", id: "membership-own", planId: "plan-1",
+      planName: "Plan mensual", startDate: "2026-08-08", status: "ACTIVE",
+      updatedAt: actor.createdAt, userId: actor.userId, version: 1,
+    };
+    memberships.set(own.id, own);
+    memberships.set("membership-other", { ...own, id: "membership-other", userId: "student-other" });
+    vi.mocked(membershipPort.listHistory).mockResolvedValueOnce({
+      cursor: { PK: `USER#${actor.userId}`, SK: `MEMBERSHIP#${own.startDate}#${own.id}` },
+      memberships: [own],
+    });
+    const request = new Request("https://app.example.com/api/v1/me/membership", {
+      headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token` },
+    });
+    const result = await service.getOwnMemberships(request, {});
+    expect(result).toMatchObject({ active: { id: own.id }, history: [{ id: own.id }] });
+    expect(membershipPort.getActive).toHaveBeenCalledWith(actor.userId);
+    expect(membershipPort.listHistory).toHaveBeenCalledWith(actor.userId, expect.any(Object));
+    const foreignCursor = Buffer.from(JSON.stringify({
+      cursor: { PK: "USER#student-other", SK: "MEMBERSHIP#2026-08-08#membership-other" },
+      owner: "student-other",
+    }), "utf8").toString("base64url");
+    await expect(service.getOwnMemberships(request, { cursor: foreignCursor }))
+      .rejects.toMatchObject({ code: "VALIDATION_ERROR", status: 422 });
+    await expect(service.listAdminMembershipReport(request, { filter: "status", value: "ACTIVE" }))
+      .rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+  });
+
+  it("allows active STAFF reports, binds cursors to the filter and denies inactive actors", async () => {
+    const { completed, membershipPort, memberships, service, userPort } = setup();
+    const actor = { ...identity, createdAt: "2026-08-08T12:00:00Z", userId: "staff-report" };
+    await userPort.createPending(actor);
+    completed.set(actor.userId, {
+      createdAt: actor.createdAt, displayName: "Personal", email: actor.email, emailVerified: true,
+      id: actor.userId, roles: ["STAFF"], status: "ACTIVE", updatedAt: actor.createdAt, version: 2,
+    });
+    const membership: Membership = {
+      createdAt: actor.createdAt, createdBy: "admin", currency: "PYG", endDate: "2026-09-08",
+      expectedAmount: 250_000, frequency: "MONTHLY", id: "membership-report", planId: "plan-1",
+      planName: "Plan mensual", startDate: "2026-08-08", status: "ACTIVE",
+      updatedAt: actor.createdAt, userId: "student-1", version: 1,
+    };
+    memberships.set(membership.id, membership);
+    const cursor = {
+      GSI1PK: "MEMBERSHIP_DUE#2026-09-08#S00", GSI1SK: `MEMBERSHIP#${membership.id}`,
+      PK: `VIEW#Membership#${membership.id}`, SK: `VIEW#DUE#${membership.userId}`,
+    };
+    vi.mocked(membershipPort.listDue).mockResolvedValueOnce({
+      cursors: { S00: cursor, S01: null, S02: null, S03: null },
+      memberships: [membership],
+    });
+    const request = new Request("https://app.example.com/api/v1/admin/membership-reports", {
+      headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token` },
+    });
+    const result = await service.listAdminMembershipReport(request, { filter: "due", value: "2026-09-08" });
+    expect(result).toMatchObject({ memberships: [{ id: membership.id, standing: "CURRENT" }] });
+    expect(result.cursor).toBeDefined();
+    if (result.cursor === undefined) throw new Error("missing report cursor");
+    await expect(service.listAdminMembershipReport(request, {
+      cursor: result.cursor,
+      filter: "status",
+      value: "ACTIVE",
+    })).rejects.toMatchObject({ code: "VALIDATION_ERROR", status: 422 });
+    expect(membershipPort.listDue).toHaveBeenCalledWith("2026-09-08", expect.objectContaining({ limitPerShard: 10 }));
+
+    const activeActor = completed.get(actor.userId);
+    if (activeActor === undefined) throw new Error("missing test actor");
+    completed.set(actor.userId, { ...activeActor, status: "SUSPENDED" });
+    await expect(service.listAdminMembershipReport(request, { filter: "due", value: "2026-09-08" }))
+      .rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+  });
 });
 
 describe("onboarding validation", () => {
@@ -1027,6 +1119,23 @@ describe("onboarding validation", () => {
     expect(validateMembershipPlanQuery(new URLSearchParams("status=ACTIVE")))
       .toEqual({ data: { status: "ACTIVE" }, success: true });
     expect(validateMembershipPlanQuery(new URLSearchParams("status=ACTIVE&userId=other")))
+      .toMatchObject({ success: false });
+  });
+});
+
+describe("membership query validation", () => {
+  it("accepts exact due/status reports and rejects invalid dates, fields and cursors", () => {
+    expect(validateMembershipReportQuery(new URLSearchParams({ filter: "due", value: "2026-09-08" })))
+      .toMatchObject({ data: { filter: "due", value: "2026-09-08" }, success: true });
+    expect(validateMembershipReportQuery(new URLSearchParams({ filter: "status", value: "ACTIVE" })))
+      .toMatchObject({ data: { filter: "status", value: "ACTIVE" }, success: true });
+    expect(validateMembershipReportQuery(new URLSearchParams({ filter: "due", value: "2026-02-30" })))
+      .toMatchObject({ success: false });
+    expect(validateMembershipReportQuery(new URLSearchParams({ filter: "status", value: "UNKNOWN" })))
+      .toMatchObject({ success: false });
+    expect(validateMembershipReportQuery(new URLSearchParams({ filter: "due", userId: "other", value: "2026-09-08" })))
+      .toMatchObject({ success: false });
+    expect(validateOwnMembershipQuery(new URLSearchParams({ cursor: "not+base64" })))
       .toMatchObject({ success: false });
   });
 });

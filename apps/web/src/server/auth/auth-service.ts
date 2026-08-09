@@ -6,8 +6,11 @@ import {
   type CreateMembershipPlanInput,
   type CreateMembershipInput,
   type CreatePendingUserResult,
+  type DynamoDbKey,
+  type MembershipFanOutCursors,
   type MembershipPlanCursors,
   type MembershipPlanPage,
+  type MembershipPage,
   type TransitionUserStatusInput,
   type UpdateMembershipPlanInput,
   type UpdateMembershipInput,
@@ -16,6 +19,7 @@ import {
 } from "@gym-adr/data-access";
 import {
   USER_STATUSES,
+  MEMBERSHIP_STATUSES,
   AuthorizationDeniedError,
   localCalendarDate,
   membershipStanding,
@@ -32,6 +36,8 @@ import type {
   MembershipPlanCommand,
   MembershipPlanQuery,
   MembershipHistoryQuery,
+  MembershipReportQuery,
+  OwnMembershipQuery,
   TransitionStudentStatusInput,
   UpdateMembershipPlanCommand,
   UpdateMembershipCommand,
@@ -88,7 +94,10 @@ export interface MembershipPlanPort {
 export interface MembershipPort {
   create(input: CreateMembershipInput): Promise<Membership>;
   getById(userId: string, startDate: string, membershipId: string, consistentRead?: boolean): Promise<Membership | undefined>;
-  listHistory(userId: string, options?: { readonly consistentRead?: boolean; readonly limit?: number }): Promise<{ readonly memberships: readonly Membership[] }>;
+  getActive(userId: string): Promise<Membership | undefined>;
+  listByStatus(status: Membership["status"], options?: { readonly cursors?: MembershipFanOutCursors; readonly limitPerShard?: number }): Promise<MembershipPage>;
+  listDue(dueDate: string, options?: { readonly cursors?: MembershipFanOutCursors; readonly limitPerShard?: number }): Promise<MembershipPage>;
+  listHistory(userId: string, options?: { readonly consistentRead?: boolean; readonly cursor?: DynamoDbKey; readonly limit?: number }): Promise<{ readonly memberships: readonly Membership[]; readonly cursor?: DynamoDbKey }>;
   update(input: UpdateMembershipInput): Promise<Membership>;
 }
 
@@ -151,6 +160,17 @@ export interface AdminMembershipPage {
     readonly canManageStates: boolean;
     readonly canWrite: boolean;
   };
+  readonly memberships: readonly AdminMembershipView[];
+}
+
+export interface OwnMembershipPage {
+  readonly active?: AdminMembershipView;
+  readonly cursor?: string;
+  readonly history: readonly AdminMembershipView[];
+}
+
+export interface AdminMembershipReportPage {
+  readonly cursor?: string;
   readonly memberships: readonly AdminMembershipView[];
 }
 
@@ -294,6 +314,72 @@ const decodePlanCursor = (cursor: string | undefined, query: MembershipPlanQuery
 
 const encodePlanCursor = (query: MembershipPlanQuery, cursors: MembershipPlanPage["cursors"]): string | undefined =>
   cursors === undefined ? undefined : Buffer.from(JSON.stringify({ cursors, query: planQueryIdentity(query) }), "utf8").toString("base64url");
+
+const decodeOwnMembershipCursor = (cursor: string | undefined, userId: string): DynamoDbKey | undefined => {
+  if (cursor === undefined) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error();
+    const record = parsed as Record<string, unknown>;
+    if (record.owner !== userId || !isCursorKey(record.cursor)) throw new Error();
+    const key = record.cursor;
+    if (Object.keys(key).length !== 2 || key.PK !== `USER#${userId}` || !key.SK?.startsWith("MEMBERSHIP#")) throw new Error();
+    return key;
+  } catch {
+    throw new ApiError(422, apiErrorCodes.validationError, "El cursor de membresías no es válido.");
+  }
+};
+
+const encodeOwnMembershipCursor = (cursor: DynamoDbKey | undefined, userId: string): string | undefined =>
+  cursor === undefined
+    ? undefined
+    : Buffer.from(JSON.stringify({ cursor, owner: userId }), "utf8").toString("base64url");
+
+const membershipReportIdentity = (query: MembershipReportQuery): string => `${query.filter}:${query.value}`;
+
+const decodeMembershipReportCursor = (
+  cursor: string | undefined,
+  query: MembershipReportQuery,
+): MembershipFanOutCursors | undefined => {
+  if (cursor === undefined) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error();
+    const record = parsed as Record<string, unknown>;
+    if (record.query !== membershipReportIdentity(query) || typeof record.cursors !== "object" || record.cursors === null || Array.isArray(record.cursors)) throw new Error();
+    const rawCursors = record.cursors as Record<string, unknown>;
+    const expectedShards = ["S00", "S01", "S02", "S03"];
+    if (Object.keys(rawCursors).length !== expectedShards.length || expectedShards.some((shard) => !(shard in rawCursors))) throw new Error();
+    const cursors: Record<string, DynamoDbKey | null> = {};
+    for (const shard of expectedShards) {
+      const raw = rawCursors[shard];
+      if (raw === null) {
+        cursors[shard] = null;
+        continue;
+      }
+      if (!isCursorKey(raw)) throw new Error();
+      const expectedPartition = query.filter === "due"
+        ? `MEMBERSHIP_DUE#${query.value}#${shard}`
+        : `MEMBERSHIP_STATUS#${query.value}#${shard}`;
+      const expectedPurpose = query.filter === "due" ? "VIEW#DUE#" : `VIEW#STATUS_${query.value}#`;
+      const validSortKey = query.filter === "due"
+        ? raw.GSI1SK?.startsWith("MEMBERSHIP#")
+        : raw.GSI1SK?.startsWith("END#") && raw.GSI1SK.includes("#MEMBERSHIP#");
+      if (Object.keys(raw).length !== 4 || !raw.PK?.startsWith("VIEW#Membership#") || !raw.SK?.startsWith(expectedPurpose) || raw.GSI1PK !== expectedPartition || !validSortKey) throw new Error();
+      cursors[shard] = raw;
+    }
+    return cursors;
+  } catch {
+    throw new ApiError(422, apiErrorCodes.validationError, "El cursor del reporte no es válido.");
+  }
+};
+
+const encodeMembershipReportCursor = (
+  query: MembershipReportQuery,
+  cursors: MembershipPage["cursors"],
+): string | undefined => cursors === undefined
+  ? undefined
+  : Buffer.from(JSON.stringify({ cursors, query: membershipReportIdentity(query) }), "utf8").toString("base64url");
 
 export class AuthService {
   private readonly clock: () => Date;
@@ -705,6 +791,74 @@ export class AuthService {
     }
   }
 
+  async getOwnMemberships(
+    request: Request,
+    query: OwnMembershipQuery,
+  ): Promise<OwnMembershipPage> {
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "own-membership-read"), 60);
+    try {
+      const scope = new AuthorizedRepositoryScope(principalFromProfile(principal));
+      return await scope.listOwn("MEMBERSHIP_READ_OWN", async (userId) => {
+        const repository = this.membershipRepository();
+        const cursor = decodeOwnMembershipCursor(query.cursor, userId);
+        const [active, history] = await Promise.all([
+          repository.getActive(userId),
+          repository.listHistory(userId, {
+            consistentRead: true,
+            ...(cursor === undefined ? {} : { cursor }),
+            limit: 20,
+          }),
+        ]);
+        const now = this.clock();
+        const encodedCursor = encodeOwnMembershipCursor(history.cursor, userId);
+        return {
+          ...(active === undefined
+            ? {}
+            : { active: { ...active, standing: membershipStanding(active, now) } }),
+          ...(encodedCursor === undefined ? {} : { cursor: encodedCursor }),
+          history: history.memberships.map((membership) => ({
+            ...membership,
+            standing: membershipStanding(membership, now),
+          })),
+        };
+      });
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible consultar tu membresía.");
+    }
+  }
+
+  async listAdminMembershipReport(
+    request: Request,
+    query: MembershipReportQuery,
+  ): Promise<AdminMembershipReportPage> {
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "membership-report"), 30);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("MEMBERSHIP_MANAGE_OPERATIONAL");
+      const repository = this.membershipRepository();
+      const cursors = decodeMembershipReportCursor(query.cursor, query);
+      const page = query.filter === "due"
+        ? await repository.listDue(query.value, { ...(cursors === undefined ? {} : { cursors }), limitPerShard: 10 })
+        : await repository.listByStatus(this.membershipStatus(query.value), { ...(cursors === undefined ? {} : { cursors }), limitPerShard: 10 });
+      const now = this.clock();
+      const encodedCursor = encodeMembershipReportCursor(query, page.cursors);
+      return {
+        ...(encodedCursor === undefined ? {} : { cursor: encodedCursor }),
+        memberships: page.memberships.map((membership) => ({
+          ...membership,
+          standing: membershipStanding(membership, now),
+        })),
+      };
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible consultar el reporte de membresías.");
+    }
+  }
+
   async createAdminMembership(
     request: Request,
     correlationId: string,
@@ -867,6 +1021,14 @@ export class AuthService {
       throw new ApiError(500, apiErrorCodes.internalError, "El servicio de membresías no está configurado.");
     }
     return this.dependencies.memberships;
+  }
+
+  private membershipStatus(value: string): Membership["status"] {
+    const status = MEMBERSHIP_STATUSES.find((candidate) => candidate === value);
+    if (status === undefined) {
+      throw new ApiError(422, apiErrorCodes.validationError, "El estado de membresía no es válido.");
+    }
+    return status;
   }
 
   private rethrowMembershipPersistence(error: unknown, operation: string): never {
