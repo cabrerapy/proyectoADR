@@ -3,7 +3,14 @@ import Link from "next/link";
 
 import { InfoCard, PageHero } from "@/components/public-page";
 
-export const metadata: Metadata = { title: "Solicitud de ingreso | Gym ADR" };
+export const metadata: Metadata = {
+  alternates: { canonical: "/ingreso" },
+  description: "Iniciá tu solicitud de ingreso a Gym ADR con Google o Facebook.",
+  robots: { follow: true, index: true },
+  title: "Solicitud de ingreso",
+};
+
+export const revalidate = 3600;
 
 const providerClassName = "inline-flex min-h-12 w-full items-center justify-center rounded-lg border border-brand-900 px-5 py-3 text-center font-bold text-brand-900 hover:bg-brand-900 hover:text-white";
 

@@ -3,7 +3,13 @@ import type { Metadata } from "next";
 import { PageHero, PrimaryLink } from "@/components/public-page";
 import { getPublicSiteContent } from "@/content/public-site-content";
 
-export const metadata: Metadata = { title: "Horarios | Gym ADR" };
+export const metadata: Metadata = {
+  alternates: { canonical: "/horarios" },
+  description: "Consultá los horarios generales de entrenamiento de Gym ADR.",
+  title: "Horarios",
+};
+
+export const revalidate = 3600;
 
 export default function SchedulesPage() {
   const content = getPublicSiteContent();

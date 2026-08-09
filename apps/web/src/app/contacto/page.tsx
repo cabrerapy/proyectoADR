@@ -3,7 +3,13 @@ import type { Metadata } from "next";
 import { ExternalLink, InfoCard, PageHero, PrimaryLink } from "@/components/public-page";
 import { getPublicSiteContent } from "@/content/public-site-content";
 
-export const metadata: Metadata = { title: "Contacto y ubicación | Gym ADR" };
+export const metadata: Metadata = {
+  alternates: { canonical: "/contacto" },
+  description: "Ubicación y canales oficiales de contacto de Gym ADR en Limpio.",
+  title: "Contacto y ubicación",
+};
+
+export const revalidate = 3600;
 
 export default function ContactPage() {
   const content = getPublicSiteContent();

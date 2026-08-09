@@ -1,4 +1,14 @@
+import type { Metadata } from "next";
+
 import { InfoCard, PrimaryLink, SectionHeading } from "@/components/public-page";
+
+export const metadata: Metadata = {
+  alternates: { canonical: "/" },
+  description:
+    "Entrenamiento de cross training adaptado a tu nivel en Limpio, Paraguay.",
+};
+
+export const revalidate = 3600;
 
 export default function Home() {
   return (

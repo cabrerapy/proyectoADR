@@ -32,6 +32,7 @@ export type PublicSiteContent = Readonly<{
   navigation: readonly PublicNavigationItem[];
   plans: readonly PublicPlan[];
   schedules: readonly PublicSchedule[];
+  siteUrl: string;
   trainers: readonly PublicTrainer[];
   whatsappUrl: string | undefined;
 }>;
@@ -74,6 +75,31 @@ const whatsappUrl = (value: string | undefined): string | undefined => {
   return `https://wa.me/${value.slice(1)}?text=${encodeURIComponent(
     "Hola, quisiera recibir información sobre Gym ADR.",
   )}`;
+};
+
+const publicSiteUrl = (value: string | undefined): string => {
+  const fallback = "http://localhost:3000";
+  if (!value) return fallback;
+
+  try {
+    const url = new URL(value);
+    const isLocalHttp =
+      url.protocol === "http:" &&
+      (url.hostname === "localhost" || url.hostname === "127.0.0.1");
+    if (
+      (url.protocol !== "https:" && !isLocalHttp) ||
+      url.username ||
+      url.password ||
+      url.pathname !== "/" ||
+      url.search ||
+      url.hash
+    ) {
+      return fallback;
+    }
+    return url.origin;
+  } catch {
+    return fallback;
+  }
 };
 
 export const getPublicSiteContent = (
@@ -124,6 +150,7 @@ export const getPublicSiteContent = (
     { days: "Lunes a viernes", hours: "Horarios a confirmar", name: "Turnos regulares" },
     { days: "Sábados", hours: "Horarios a confirmar", name: "Entrenamiento de fin de semana" },
   ],
+  siteUrl: publicSiteUrl(environment.NEXT_PUBLIC_GYM_SITE_URL),
   trainers: [
     { name: "Equipo Gym ADR", specialty: "Cross training y acondicionamiento" },
   ],

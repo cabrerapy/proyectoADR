@@ -2,7 +2,13 @@ import type { Metadata } from "next";
 
 import { PageHero, PrimaryLink } from "@/components/public-page";
 
-export const metadata: Metadata = { title: "Galería | Gym ADR" };
+export const metadata: Metadata = {
+  alternates: { canonical: "/galeria" },
+  description: "Conocé el ambiente y las actividades de Gym ADR.",
+  title: "Galería",
+};
+
+export const revalidate = 3600;
 
 export default function GalleryPage() {
   return (

@@ -3,7 +3,13 @@ import type { Metadata } from "next";
 import { InfoCard, PageHero, PrimaryLink } from "@/components/public-page";
 import { getPublicSiteContent } from "@/content/public-site-content";
 
-export const metadata: Metadata = { title: "Planes y precios | Gym ADR" };
+export const metadata: Metadata = {
+  alternates: { canonical: "/planes" },
+  description: "Consultá los planes y precios de entrenamiento de Gym ADR.",
+  title: "Planes y precios",
+};
+
+export const revalidate = 3600;
 
 export default function PlansPage() {
   const content = getPublicSiteContent();

@@ -3,7 +3,13 @@ import type { Metadata } from "next";
 import { InfoCard, PageHero, PrimaryLink, SectionHeading } from "@/components/public-page";
 import { getPublicSiteContent } from "@/content/public-site-content";
 
-export const metadata: Metadata = { title: "El gimnasio | Gym ADR" };
+export const metadata: Metadata = {
+  alternates: { canonical: "/gimnasio" },
+  description: "Conocé los entrenadores, instalaciones y equipamiento de Gym ADR.",
+  title: "El gimnasio",
+};
+
+export const revalidate = 3600;
 
 export default function GymPage() {
   const content = getPublicSiteContent();
