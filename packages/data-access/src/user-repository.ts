@@ -43,6 +43,14 @@ export interface CreatePendingUserResult {
   readonly profile: UserProfile;
 }
 
+export interface CompletePendingProfileInput {
+  readonly displayName: string;
+  readonly expectedVersion: number;
+  readonly onboardingCompletedAt: string;
+  readonly phone: string;
+  readonly userId: string;
+}
+
 export interface UpdateUserProfileInput {
   readonly displayName: string;
   readonly email: string;
@@ -67,6 +75,8 @@ interface UserProfileItem extends DynamoDbItem {
   readonly email: string;
   readonly emailVerified: boolean;
   readonly entityType: "UserProfile";
+  readonly onboardingCompletedAt?: string;
+  readonly phone?: string;
   readonly roles: readonly UserRole[];
   readonly schemaVersion: typeof CURRENT_SCHEMA_VERSION;
   readonly searchTokenVersions: readonly string[];
@@ -85,7 +95,12 @@ interface LookupRecord {
 const tableNamePattern = /^[A-Za-z0-9_.-]{3,255}$/u;
 
 const userError = (
-  code: "USER_EMAIL_CONFLICT" | "USER_RECORD_INVALID" | "USER_VERSION_CONFLICT",
+  code:
+    | "USER_EMAIL_CONFLICT"
+    | "USER_ONBOARDING_COMPLETE"
+    | "USER_RECORD_INVALID"
+    | "USER_STATUS_INVALID"
+    | "USER_VERSION_CONFLICT",
   message: string,
 ): DynamoDbRepositoryError => new DynamoDbRepositoryError(code, message);
 
@@ -129,6 +144,14 @@ const roles = (value: readonly UserRole[]): readonly UserRole[] => {
 const storedDisplayName = (value: string): string => {
   normalizePersonName(value);
   return value.trim().normalize("NFKC").replace(/\s+/gu, " ");
+};
+
+const storedPhone = (value: string): string => {
+  const normalized = value.trim().normalize("NFKC");
+  if (!/^\+[1-9]\d{7,14}$/u.test(normalized)) {
+    throw invalidDynamoDbInput("El teléfono del perfil no es válido.");
+  }
+  return normalized;
 };
 
 const verifiedEmail = (value: string, verified: boolean): string => {
@@ -249,6 +272,134 @@ export class UserRepository {
       }
       throw mapped;
     }
+  }
+
+  async completePendingProfile(
+    input: CompletePendingProfileInput,
+  ): Promise<UserProfile> {
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+      throw invalidDynamoDbInput("La versión esperada del perfil no es válida.");
+    }
+    const key = this.safeProfileKey(input.userId);
+    const currentItem = await this.base.get(key, true);
+    if (currentItem === undefined) {
+      throw new DynamoDbRepositoryError("RESOURCE_NOT_FOUND", "El perfil solicitado no existe.");
+    }
+    const current = this.readProfileItem(currentItem, key);
+    const displayName = storedDisplayName(input.displayName);
+    const phone = storedPhone(input.phone);
+
+    if (current.onboardingCompletedAt !== undefined) {
+      if (current.displayName === displayName && current.phone === phone) {
+        return this.toDomain(current);
+      }
+      throw userError("USER_ONBOARDING_COMPLETE", "El perfil inicial ya fue completado.");
+    }
+    if (current.status !== "PENDING") {
+      throw userError("USER_STATUS_INVALID", "El estado del usuario no permite completar el perfil.");
+    }
+    if (current.version !== input.expectedVersion) {
+      throw userError("USER_VERSION_CONFLICT", "El perfil fue modificado por otra operación.");
+    }
+    const completedAt = timestamp(input.onboardingCompletedAt, "onboardingCompletedAt");
+    if (completedAt < current.updatedAt) {
+      throw invalidDynamoDbInput("onboardingCompletedAt no puede ser anterior al perfil vigente.");
+    }
+    const nextVersion = input.expectedVersion + 1;
+    if (!Number.isSafeInteger(nextVersion)) {
+      throw invalidDynamoDbInput("La versión siguiente del perfil no es válida.");
+    }
+    this.searchTokens.assertVersionsAvailable(current.searchTokenVersions);
+    const previousLookups = new Map(
+      this.lookupRecords(
+        current.email,
+        current.displayName,
+        input.userId,
+        current.searchTokenVersions,
+      ).map((record) => [lookupId(record), record]),
+    );
+    const desiredLookups = new Map(
+      this.lookupRecords(current.email, displayName, input.userId).map((record) => [
+        lookupId(record),
+        record,
+      ]),
+    );
+    const actions: TransactionAction[] = [
+      {
+        Update: {
+          ConditionExpression:
+            "attribute_exists(#pk) AND #version = :expectedVersion AND #status = :pending AND attribute_not_exists(#completedAt)",
+          ExpressionAttributeNames: {
+            "#completedAt": "onboardingCompletedAt",
+            "#displayName": "displayName",
+            "#phone": "phone",
+            "#pk": "PK",
+            "#searchTokenVersions": "searchTokenVersions",
+            "#status": "status",
+            "#updatedAt": "updatedAt",
+            "#version": "version",
+          },
+          ExpressionAttributeValues: {
+            ":completedAt": completedAt,
+            ":displayName": displayName,
+            ":expectedVersion": input.expectedVersion,
+            ":nextVersion": nextVersion,
+            ":pending": "PENDING",
+            ":phone": phone,
+            ":searchTokenVersions": this.searchTokens.versions,
+            ":updatedAt": completedAt,
+          },
+          Key: key,
+          TableName: this.tableName,
+          UpdateExpression:
+            "SET #displayName = :displayName, #phone = :phone, #completedAt = :completedAt, #updatedAt = :updatedAt, #version = :nextVersion, #searchTokenVersions = :searchTokenVersions",
+        },
+      },
+      ...[...previousLookups]
+        .filter(([id]) => !desiredLookups.has(id))
+        .map(([, record]) => this.createLookupDelete(record, input.userId)),
+      ...[...desiredLookups.values()].map((record) =>
+        this.createLookupUpsert(record, input.userId, completedAt)
+      ),
+    ];
+    this.assertTransactionSize(actions);
+
+    try {
+      await this.document.transactWrite({ TransactItems: actions });
+    } catch (error) {
+      const mapped = mapDynamoDbError(error);
+      if (mapped.code === "TRANSACTION_CANCELLED" || mapped.code === "CONDITIONAL_CHECK_FAILED") {
+        const latest = await this.getById(input.userId, true);
+        if (latest === undefined) {
+          throw new DynamoDbRepositoryError("RESOURCE_NOT_FOUND", "El perfil solicitado no existe.");
+        }
+        if (
+          latest.onboardingCompletedAt !== undefined &&
+          latest.displayName === displayName &&
+          latest.phone === phone
+        ) return latest;
+        if (latest.onboardingCompletedAt !== undefined) {
+          throw userError("USER_ONBOARDING_COMPLETE", "El perfil inicial ya fue completado.");
+        }
+        if (latest.status !== "PENDING") {
+          throw userError("USER_STATUS_INVALID", "El estado del usuario no permite completar el perfil.");
+        }
+        if (latest.version !== input.expectedVersion) {
+          throw userError("USER_VERSION_CONFLICT", "El perfil fue modificado por otra operación.");
+        }
+      }
+      throw mapped;
+    }
+
+    return this.toDomain({
+      ...current,
+      displayName,
+      onboardingCompletedAt: completedAt,
+      phone,
+      searchTokenVersions: this.searchTokens.versions,
+      updatedAt: completedAt,
+      version: nextVersion,
+    });
   }
 
   destroy(): void {
@@ -542,6 +693,10 @@ export class UserRepository {
       email,
       emailVerified: true,
       id: input.userId,
+      ...(current.onboardingCompletedAt === undefined
+        ? {}
+        : { onboardingCompletedAt: current.onboardingCompletedAt }),
+      ...(current.phone === undefined ? {} : { phone: current.phone }),
       roles: nextRoles,
       status: input.status,
       updatedAt,
@@ -719,6 +874,9 @@ export class UserRepository {
       typeof item.displayName !== "string" ||
       typeof item.email !== "string" ||
       item.emailVerified !== true ||
+      (item.onboardingCompletedAt !== undefined && typeof item.onboardingCompletedAt !== "string") ||
+      (item.phone !== undefined && typeof item.phone !== "string") ||
+      ((item.onboardingCompletedAt === undefined) !== (item.phone === undefined)) ||
       !isStatus(item.status) ||
       !Array.isArray(item.roles) ||
       item.roles.some((role) => !isRole(role)) ||
@@ -738,6 +896,10 @@ export class UserRepository {
       timestamp(item.updatedAt, "updatedAt");
       verifiedEmail(item.email, item.emailVerified);
       storedDisplayName(item.displayName);
+      if (item.phone !== undefined) storedPhone(item.phone);
+      if (item.onboardingCompletedAt !== undefined) {
+        timestamp(item.onboardingCompletedAt, "onboardingCompletedAt");
+      }
       const validRoles = roles(item.roles.filter(isRole));
       const tokenVersions = item.searchTokenVersions.filter(
         (entry): entry is string => typeof entry === "string",
@@ -762,6 +924,10 @@ export class UserRepository {
         email: item.email,
         emailVerified: true,
         entityType: "UserProfile",
+        ...(item.onboardingCompletedAt === undefined
+          ? {}
+          : { onboardingCompletedAt: item.onboardingCompletedAt }),
+        ...(item.phone === undefined ? {} : { phone: item.phone }),
         roles: validRoles,
         schemaVersion: CURRENT_SCHEMA_VERSION,
         searchTokenVersions: tokenVersions,
@@ -804,6 +970,10 @@ export class UserRepository {
       email: item.email,
       emailVerified: item.emailVerified,
       id: item.userId,
+      ...(item.onboardingCompletedAt === undefined
+        ? {}
+        : { onboardingCompletedAt: item.onboardingCompletedAt }),
+      ...(item.phone === undefined ? {} : { phone: item.phone }),
       roles: item.roles,
       status: item.status,
       updatedAt: item.updatedAt,

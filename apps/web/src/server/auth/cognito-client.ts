@@ -12,6 +12,7 @@ export interface VerifiedIdentity {
 export interface CognitoTokenPort {
   exchangeCode(code: string, codeVerifier: string): Promise<string>;
   verifyIdToken(idToken: string, expectedNonce: string): Promise<VerifiedIdentity>;
+  verifySessionToken(idToken: string): Promise<VerifiedIdentity>;
 }
 
 const safeName = (claims: Record<string, unknown>, email: string): string => {
@@ -62,12 +63,21 @@ export class CognitoTokenClient implements CognitoTokenPort {
   }
 
   async verifyIdToken(idToken: string, expectedNonce: string): Promise<VerifiedIdentity> {
+    return this.verify(idToken, expectedNonce);
+  }
+
+  async verifySessionToken(idToken: string): Promise<VerifiedIdentity> {
+    return this.verify(idToken);
+  }
+
+  private async verify(idToken: string, expectedNonce?: string): Promise<VerifiedIdentity> {
     const { payload } = await jwtVerify(idToken, this.keySet, {
       audience: this.config.clientId,
       issuer: this.config.issuer,
     });
     if (
-      payload.token_use !== "id" || payload.nonce !== expectedNonce ||
+      payload.token_use !== "id" ||
+      (expectedNonce !== undefined && payload.nonce !== expectedNonce) ||
       typeof payload.sub !== "string" || typeof payload.email !== "string" ||
       payload.email_verified !== true
     ) throw new Error("Cognito identity claims are invalid");

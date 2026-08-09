@@ -1,6 +1,9 @@
 export const apiErrorCodes = {
+  authenticationRequired: "AUTHENTICATION_REQUIRED",
   authenticationFailed: "AUTHENTICATION_FAILED",
   authenticationInvalid: "AUTHENTICATION_INVALID",
+  conflict: "CONFLICT",
+  forbidden: "FORBIDDEN",
   internalError: "INTERNAL_ERROR",
   invalidContentType: "INVALID_CONTENT_TYPE",
   invalidJson: "INVALID_JSON",
@@ -12,7 +15,7 @@ export const apiErrorCodes = {
 export type ApiErrorCode =
   (typeof apiErrorCodes)[keyof typeof apiErrorCodes];
 
-export type ApiErrorStatus = 400 | 401 | 413 | 415 | 422 | 429 | 500 | 502;
+export type ApiErrorStatus = 400 | 401 | 403 | 409 | 413 | 415 | 422 | 429 | 500 | 502;
 
 export type FieldErrors = Readonly<Record<string, readonly string[]>>;
 

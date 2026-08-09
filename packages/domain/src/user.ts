@@ -20,6 +20,8 @@ export interface UserProfile {
   readonly displayName: string;
   readonly email: string;
   readonly emailVerified: boolean;
+  readonly onboardingCompletedAt?: string;
+  readonly phone?: string;
   readonly roles: readonly UserRole[];
   readonly status: UserStatus;
   readonly updatedAt: string;

@@ -25,7 +25,7 @@ const exactBaseUrl = (value: string, allowHttp: boolean): string => {
   const url = new URL(value);
   if (
     (url.protocol !== "https:" && !(allowHttp && url.protocol === "http:")) ||
-    (url.protocol === "http:" && url.hostname !== "localhost") ||
+    (url.protocol === "http:" && !["localhost", "127.0.0.1"].includes(url.hostname)) ||
     url.pathname !== "/" || url.search !== "" || url.hash !== "" ||
     url.username !== "" || url.password !== ""
   ) throw new Error("Invalid authentication base URL");

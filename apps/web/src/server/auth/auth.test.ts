@@ -5,12 +5,14 @@ import {
   SignJWT,
 } from "jose";
 import type { CreatePendingUserResult } from "@gym-adr/data-access";
+import type { UserProfile } from "@gym-adr/domain";
+import { validateCompleteProfile } from "@gym-adr/validation";
 import { describe, expect, it, vi } from "vitest";
 
 import { resolveAuthConfig, type AuthConfig } from "./auth-config";
 import { AuthService, type PendingUserPort } from "./auth-service";
 import { CognitoTokenClient, type CognitoTokenPort } from "./cognito-client";
-import { oauthCookieNames } from "./cookies";
+import { oauthCookieNames, sessionCookieName } from "./cookies";
 import { FixedWindowRateLimiter } from "./rate-limiter";
 
 const config: AuthConfig = {
@@ -65,31 +67,54 @@ describe("OAuth session service", () => {
 
   const setup = () => {
     const users = new Map<string, Parameters<PendingUserPort["createPending"]>[0]>();
+    const completed = new Map<string, UserProfile>();
+    const toProfile = (
+      stored: Parameters<PendingUserPort["createPending"]>[0],
+    ): UserProfile => completed.get(stored.userId) ?? {
+      createdAt: stored.createdAt,
+      displayName: stored.displayName,
+      email: stored.email,
+      emailVerified: true,
+      id: stored.userId,
+      roles: ["STUDENT"],
+      status: "PENDING",
+      updatedAt: stored.createdAt,
+      version: 1,
+    };
     const userPort: PendingUserPort = {
+      completePendingProfile: vi.fn(async (input) => {
+        const stored = [...users.values()].find((entry) => entry.userId === input.userId);
+        if (stored === undefined) throw new Error("missing test user");
+        const profile: UserProfile = {
+          ...toProfile(stored),
+          displayName: input.displayName,
+          onboardingCompletedAt: input.onboardingCompletedAt,
+          phone: input.phone,
+          updatedAt: input.onboardingCompletedAt,
+          version: input.expectedVersion + 1,
+        };
+        completed.set(input.userId, profile);
+        return profile;
+      }),
       createPending: vi.fn(async (input) => {
         const existing = users.get(input.cognitoSub);
         users.set(input.cognitoSub, existing ?? input);
         const stored = existing ?? input;
         const result: CreatePendingUserResult = {
           disposition: existing === undefined ? "CREATED" : "EXISTING",
-          profile: {
-            createdAt: stored.createdAt,
-            displayName: stored.displayName,
-            email: stored.email,
-            emailVerified: true,
-            id: stored.userId,
-            roles: ["STUDENT"],
-            status: "PENDING",
-            updatedAt: stored.createdAt,
-            version: 1,
-          },
+          profile: toProfile(stored),
         };
         return result;
+      }),
+      findByCognitoSub: vi.fn(async (sub) => {
+        const stored = users.get(sub);
+        return stored === undefined ? undefined : toProfile(stored);
       }),
     };
     const tokens: CognitoTokenPort = {
       exchangeCode: vi.fn(async () => "signed-id-token"),
       verifyIdToken: vi.fn(async () => identity),
+      verifySessionToken: vi.fn(async () => identity),
     };
     let sequence = 0;
     const service = new AuthService({
@@ -100,7 +125,7 @@ describe("OAuth session service", () => {
       tokens,
       users: userPort,
     });
-    return { service, tokens, userPort, users };
+    return { completed, service, tokens, userPort, users };
   };
 
   it("starts authorization with state, nonce, S256 PKCE and hardened cookies", () => {
@@ -147,6 +172,112 @@ describe("OAuth session service", () => {
     expect([...users.values()][0]).toMatchObject({ userId: "user-1" });
     expect(first.headers.getSetCookie().join(";")).toContain("__Host-gym_session=signed-id-token");
     expect(first.headers.getSetCookie().join(";")).toContain("Max-Age=0");
+    expect(first.headers.get("location")).toBe("https://app.example.com/onboarding");
+  });
+
+  it("requires a verified session and derives profile ownership from Cognito", async () => {
+    const { service, userPort } = setup();
+    await expect(service.getOnboardingProfile(new Request("https://app.example.com/api/v1/onboarding")))
+      .rejects.toMatchObject({ code: "AUTHENTICATION_REQUIRED", status: 401 });
+
+    await userPort.createPending({ ...identity, createdAt: "2026-08-08T12:00:00.000Z", userId: "owned-user" });
+    const request = new Request("https://app.example.com/api/v1/onboarding", {
+      headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token` },
+    });
+    await expect(service.getOnboardingProfile(request)).resolves.toMatchObject({
+      displayName: "María Núñez",
+      status: "PENDING",
+      version: 1,
+    });
+  });
+
+  it("completes only the session owner and keeps the account PENDING", async () => {
+    const { service, userPort } = setup();
+    await userPort.createPending({ ...identity, createdAt: "2026-08-08T12:00:00.000Z", userId: "owned-user" });
+    const request = new Request("https://app.example.com/api/v1/onboarding", {
+      headers: {
+        cookie: `${sessionCookieName(config.environment)}=signed-id-token`,
+        origin: config.appBaseUrl,
+      },
+      method: "PATCH",
+    });
+    await expect(service.completeProfile(request, {
+      displayName: "María Núñez",
+      expectedVersion: 1,
+      phone: "+595981123456",
+    })).resolves.toMatchObject({ completed: true, status: "PENDING", version: 2 });
+    expect(userPort.completePendingProfile).toHaveBeenCalledWith(expect.objectContaining({
+      userId: "owned-user",
+    }));
+  });
+
+  it.each(["ACTIVE", "SUSPENDED", "REJECTED", "INACTIVE"] as const)(
+    "rejects profile completion for a %s account",
+    async (status) => {
+      const { completed, service, userPort } = setup();
+      const stored = { ...identity, createdAt: "2026-08-08T12:00:00.000Z", userId: "owned-user" };
+      await userPort.createPending(stored);
+      completed.set(stored.userId, {
+        createdAt: stored.createdAt,
+        displayName: stored.displayName,
+        email: stored.email,
+        emailVerified: true,
+        id: stored.userId,
+        roles: ["STUDENT"],
+        status,
+        updatedAt: stored.createdAt,
+        version: 1,
+      });
+      const request = new Request("https://app.example.com/api/v1/onboarding", {
+        headers: {
+          cookie: `${sessionCookieName(config.environment)}=signed-id-token`,
+          origin: config.appBaseUrl,
+        },
+        method: "PATCH",
+      });
+      await expect(service.completeProfile(request, {
+        displayName: "María Núñez",
+        expectedVersion: 1,
+        phone: "+595981123456",
+      })).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+    },
+  );
+
+  it("rejects cross-origin completion and clears the session during logout", async () => {
+    const { service } = setup();
+    await expect(service.completeProfile(new Request("https://app.example.com/api/v1/onboarding", {
+      headers: { origin: "https://attacker.example" },
+      method: "PATCH",
+    }), { displayName: "María Núñez", expectedVersion: 1, phone: "+595981123456" }))
+      .rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+
+    const response = service.logout(new Request("https://app.example.com/api/auth/logout", {
+      headers: { origin: config.appBaseUrl },
+      method: "POST",
+    }));
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toContain("/logout?");
+    expect(response.headers.getSetCookie().join(";")).toContain("Max-Age=0");
+  });
+});
+
+describe("onboarding validation", () => {
+  it("normalizes a Paraguayan phone and rejects protected client fields", () => {
+    expect(validateCompleteProfile({
+      displayName: "  María   Núñez ",
+      expectedVersion: 1,
+      phone: "0981 123-456",
+    })).toEqual({
+      data: { displayName: "María Núñez", expectedVersion: 1, phone: "+595981123456" },
+      success: true,
+    });
+    expect(validateCompleteProfile({
+      displayName: "María Núñez",
+      expectedVersion: 1,
+      phone: "+595981123456",
+      role: "ADMIN",
+      userId: "another-user",
+    })).toMatchObject({ success: false });
   });
 });
 
@@ -177,5 +308,29 @@ describe("Cognito ID token verification", () => {
       emailVerified: true,
     });
     await expect(verifier.verifyIdToken(token, "other-nonce")).rejects.toThrow("claims");
+    await expect(verifier.verifySessionToken(token)).resolves.toMatchObject({
+      cognitoSub: "subject-001",
+    });
+  });
+
+  it("rejects an expired session token", async () => {
+    const { privateKey, publicKey } = await generateKeyPair("RS256");
+    const jwk = await exportJWK(publicKey);
+    const verifier = new CognitoTokenClient(
+      config,
+      createLocalJWKSet({ keys: [{ ...jwk, alg: "RS256", kid: "key-2", use: "sig" }] }),
+    );
+    const token = await new SignJWT({
+      email: "maria@example.com",
+      email_verified: true,
+      token_use: "id",
+    })
+      .setProtectedHeader({ alg: "RS256", kid: "key-2" })
+      .setIssuer(config.issuer)
+      .setAudience(config.clientId)
+      .setSubject("subject-001")
+      .setExpirationTime(Math.floor(Date.now() / 1_000) - 10)
+      .sign(privateKey);
+    await expect(verifier.verifySessionToken(token)).rejects.toThrow();
   });
 });

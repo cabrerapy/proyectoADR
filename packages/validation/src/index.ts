@@ -12,3 +12,5 @@ export type ValidationResult<T> =
       readonly success: false;
       readonly issues: NonEmptyReadonlyArray<ValidationIssue>;
     };
+
+export * from "./profile";

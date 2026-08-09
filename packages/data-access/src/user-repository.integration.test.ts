@@ -133,6 +133,41 @@ describe.skipIf(!enabled)("UserRepository with DynamoDB Local", () => {
       .resolves.toMatchObject({ profiles: [{ id: "user-001" }] });
   });
 
+  it("completes one pending profile atomically and replays the same request", async () => {
+    const onboardingUser = {
+      ...pendingUser,
+      cognitoSub: "google-subject-onboarding",
+      email: "onboarding@example.com",
+      userId: "user-onboarding",
+    };
+    await repository.createPending(onboardingUser);
+    const command = {
+      displayName: "Ana González",
+      expectedVersion: 1,
+      onboardingCompletedAt: "2026-08-08T12:30:00Z",
+      phone: "+595981123456",
+      userId: onboardingUser.userId,
+    } as const;
+
+    const first = await repository.completePendingProfile(command);
+    const replay = await repository.completePendingProfile(command);
+    expect(first).toMatchObject({
+      displayName: "Ana González",
+      onboardingCompletedAt: "2026-08-08T12:30:00Z",
+      phone: "+595981123456",
+      roles: ["STUDENT"],
+      status: "PENDING",
+      version: 2,
+    });
+    expect(replay).toEqual(first);
+    await expect(repository.completePendingProfile({
+      ...command,
+      phone: "+595981999999",
+    })).rejects.toMatchObject({ code: "USER_ONBOARDING_COMPLETE" });
+    await expect(repository.searchByName("Ana Gon"))
+      .resolves.toMatchObject({ profiles: [{ id: onboardingUser.userId, version: 2 }] });
+  });
+
   it("allows only one owner for a verified email under concurrency", async () => {
     const results = await Promise.allSettled([
       repository.createPending({

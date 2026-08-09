@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 
-import type { CreatePendingUserResult } from "@gym-adr/data-access";
+import {
+  DynamoDbRepositoryError,
+  type CompletePendingProfileInput,
+  type CreatePendingUserResult,
+} from "@gym-adr/data-access";
+import type { UserProfile } from "@gym-adr/domain";
+import type { CompleteProfileInput } from "@gym-adr/validation";
 
 import { ApiError, apiErrorCodes } from "../http/api-error";
 import type { AuthConfig } from "./auth-config";
@@ -18,6 +24,17 @@ export interface PendingUserPort {
     readonly emailVerified: boolean;
     readonly userId: string;
   }): Promise<CreatePendingUserResult>;
+  completePendingProfile(input: CompletePendingProfileInput): Promise<UserProfile>;
+  findByCognitoSub(cognitoSub: string): Promise<UserProfile | undefined>;
+}
+
+export interface OnboardingProfile {
+  readonly completed: boolean;
+  readonly displayName: string;
+  readonly email: string;
+  readonly phone?: string;
+  readonly status: UserProfile["status"];
+  readonly version: number;
 }
 
 export interface AuthServiceDependencies {
@@ -32,6 +49,17 @@ export interface AuthServiceDependencies {
 const appendCookie = (headers: Headers, cookie: string): void => headers.append("set-cookie", cookie);
 const invalidAuthentication = (message: string): ApiError =>
   new ApiError(400, apiErrorCodes.authenticationInvalid, message);
+const authenticationRequired = (): ApiError =>
+  new ApiError(401, apiErrorCodes.authenticationRequired, "Tu sesión no es válida o expiró.");
+
+const toOnboardingProfile = (profile: UserProfile): OnboardingProfile => ({
+  completed: profile.onboardingCompletedAt !== undefined,
+  displayName: profile.displayName,
+  email: profile.email,
+  ...(profile.phone === undefined ? {} : { phone: profile.phone }),
+  status: profile.status,
+  version: profile.version,
+});
 
 export class AuthService {
   private readonly clock: () => Date;
@@ -108,7 +136,9 @@ export class AuthService {
         createdAt: this.clock().toISOString(),
         userId: this.ids(),
       });
-      const headers = new Headers({ location: this.dependencies.config.appBaseUrl });
+      const headers = new Headers({
+        location: new URL("/onboarding", this.dependencies.config.appBaseUrl).toString(),
+      });
       const clear = { environment: this.dependencies.config.environment, maxAge: 0 } as const;
       appendCookie(headers, serializeCookie(oauthCookieNames.state, "", clear));
       appendCookie(headers, serializeCookie(oauthCookieNames.nonce, "", clear));
@@ -120,6 +150,94 @@ export class AuthService {
       return new Response(null, { headers, status: 302 });
     } catch {
       throw new ApiError(502, apiErrorCodes.internalError, "No fue posible completar el alta del perfil.");
+    }
+  }
+
+  async getOnboardingProfile(request: Request): Promise<OnboardingProfile> {
+    return toOnboardingProfile(await this.authenticate(request));
+  }
+
+  async completeProfile(
+    request: Request,
+    input: CompleteProfileInput,
+  ): Promise<OnboardingProfile> {
+    this.assertSameOrigin(request);
+    const profile = await this.authenticate(request);
+    if (profile.status !== "PENDING") {
+      throw new ApiError(
+        403,
+        apiErrorCodes.forbidden,
+        "El estado de tu cuenta no permite completar esta solicitud.",
+      );
+    }
+    try {
+      return toOnboardingProfile(await this.dependencies.users.completePendingProfile({
+        ...input,
+        onboardingCompletedAt: this.clock().toISOString(),
+        userId: profile.id,
+      }));
+    } catch (error) {
+      if (error instanceof DynamoDbRepositoryError) {
+        if (error.code === "USER_STATUS_INVALID") {
+          throw new ApiError(403, apiErrorCodes.forbidden, "El estado de tu cuenta cambió.");
+        }
+        if (
+          error.code === "USER_VERSION_CONFLICT" ||
+          error.code === "USER_ONBOARDING_COMPLETE"
+        ) {
+          throw new ApiError(
+            409,
+            apiErrorCodes.conflict,
+            "El perfil cambió. Actualiza la página antes de volver a intentar.",
+          );
+        }
+      }
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible guardar el perfil.");
+    }
+  }
+
+  logout(request: Request): Response {
+    this.assertSameOrigin(request);
+    const destination = new URL("/logout", this.dependencies.config.hostedUiBaseUrl);
+    destination.search = new URLSearchParams({
+      client_id: this.dependencies.config.clientId,
+      logout_uri: this.dependencies.config.appBaseUrl,
+    }).toString();
+    const headers = new Headers({ location: destination.toString() });
+    appendCookie(headers, serializeCookie(
+      sessionCookieName(this.dependencies.config.environment),
+      "",
+      { environment: this.dependencies.config.environment, maxAge: 0 },
+    ));
+    return new Response(null, { headers, status: 302 });
+  }
+
+  private async authenticate(request: Request): Promise<UserProfile> {
+    const session = readCookies(request.headers.get("cookie"))[
+      sessionCookieName(this.dependencies.config.environment)
+    ];
+    if (session === undefined || session.length === 0 || session.length > 20_000) {
+      throw authenticationRequired();
+    }
+    let identity: Awaited<ReturnType<CognitoTokenPort["verifySessionToken"]>>;
+    try {
+      identity = await this.dependencies.tokens.verifySessionToken(session);
+    } catch {
+      throw authenticationRequired();
+    }
+    try {
+      const profile = await this.dependencies.users.findByCognitoSub(identity.cognitoSub);
+      if (profile === undefined) throw authenticationRequired();
+      return profile;
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible validar la sesión.");
+    }
+  }
+
+  private assertSameOrigin(request: Request): void {
+    if (request.headers.get("origin") !== this.dependencies.config.appBaseUrl) {
+      throw new ApiError(403, apiErrorCodes.forbidden, "El origen de la solicitud no es válido.");
     }
   }
 }
