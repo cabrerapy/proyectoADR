@@ -56,3 +56,13 @@ body {
 .skip-link:focus {
   transform: translateY(0);
 }
+
+.hero-grid {
+  background-image:
+    radial-gradient(circle at 85% 20%, rgb(226 185 59 / 24%), transparent 24rem),
+    linear-gradient(135deg, var(--gym-color-brand-900), var(--gym-color-brand-700));
+}
+
+.mobile-navigation summary::-webkit-details-marker {
+  display: none;
+}
