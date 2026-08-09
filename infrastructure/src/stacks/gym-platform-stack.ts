@@ -90,8 +90,19 @@ export class GymPlatformStack extends Stack {
     );
     this.webHosting.serverFunction.addToRolePolicy(
       new PolicyStatement({
-        actions: ["dynamodb:GetItem", "dynamodb:TransactWriteItems"],
+        actions: [
+          "dynamodb:BatchGetItem",
+          "dynamodb:GetItem",
+          "dynamodb:Query",
+          "dynamodb:TransactWriteItems",
+        ],
         resources: [this.dynamoDbTable.table.tableArn],
+      }),
+    );
+    this.webHosting.serverFunction.addToRolePolicy(
+      new PolicyStatement({
+        actions: ["dynamodb:Query"],
+        resources: [`${this.dynamoDbTable.table.tableArn}/index/*`],
       }),
     );
     this.securityFoundation.searchTokenSecret.grantRead(

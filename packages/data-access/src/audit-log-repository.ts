@@ -1,4 +1,5 @@
 import { AUDIT_RESULTS, type AuditLog, type AuditResult } from "@gym-adr/domain";
+import type { TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 
 import { BaseDynamoDbRepository } from "./base-repository";
 import type { DynamoDbDocumentPort, DynamoDbItem, DynamoDbKey } from "./dynamodb-adapter";
@@ -9,6 +10,7 @@ import { CURRENT_SCHEMA_VERSION, ENTITY_TYPES, type EntityType, type PrimaryKey 
 import { operationId, operationText, operationTimestamp } from "./operations-validation";
 
 type AuditValue = string | number | boolean | null;
+type TransactionAction = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
 const SENSITIVE_FIELD = /(authorization|cookie|credential|password|secret|token)/iu;
 
 export interface AppendAuditLogInput {
@@ -43,6 +45,16 @@ export class AuditLogRepository {
   }
 
   async append(input: AppendAuditLogInput): Promise<AuditLog> {
+    const { action, entry } = this.createAppendAction(input);
+    if (action.Put === undefined) throw invalidDynamoDbInput("La acción de auditoría no es válida.");
+    await this.document.put(action.Put);
+    return entry;
+  }
+
+  createAppendAction(input: AppendAuditLogInput): {
+    readonly action: TransactionAction;
+    readonly entry: AuditLog;
+  } {
     if (!ENTITY_TYPES.some((type) => type === input.targetType) || !isResult(input.result)) throw invalidDynamoDbInput("El tipo de entidad o resultado de auditoría no es válido.");
     const details = this.sanitize(input.details ?? {});
     const entry: AuditLog = {
@@ -57,13 +69,17 @@ export class AuditLogRepository {
       timestamp: operationTimestamp(input.timestamp, "timestamp"),
     };
     const index = relationshipIndexKeys.auditActor(entry.actorId, entry.timestamp, entry.id);
-    await this.document.put({
-      ConditionExpression: "attribute_not_exists(#pk) AND attribute_not_exists(#sk)",
-      ExpressionAttributeNames: { "#pk": "PK", "#sk": "SK" },
-      Item: { ...primaryKeys.auditLog(input.targetType, entry.targetId, entry.timestamp, entry.id), GSI2PK: index.PK, GSI2SK: index.SK, ...entry, auditId: entry.id, entityType: "AuditLog", schemaVersion: CURRENT_SCHEMA_VERSION },
-      TableName: this.table,
-    });
-    return entry;
+    return {
+      action: {
+        Put: {
+          ConditionExpression: "attribute_not_exists(#pk) AND attribute_not_exists(#sk)",
+          ExpressionAttributeNames: { "#pk": "PK", "#sk": "SK" },
+          Item: { ...primaryKeys.auditLog(input.targetType, entry.targetId, entry.timestamp, entry.id), GSI2PK: index.PK, GSI2SK: index.SK, ...entry, auditId: entry.id, entityType: "AuditLog", schemaVersion: CURRENT_SCHEMA_VERSION },
+          TableName: this.table,
+        },
+      },
+      entry,
+    };
   }
 
   async listByEntity(targetType: EntityType, targetId: string, from: string, to: string, options: { readonly cursor?: DynamoDbKey; readonly limit?: number } = {}): Promise<AuditPage> {

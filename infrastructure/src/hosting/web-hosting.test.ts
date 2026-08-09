@@ -129,11 +129,13 @@ describe("OpenNext web hosting", () => {
     });
   });
 
-  it("grants the server only the DynamoDB operations required by auth", () => {
+  it("grants the server only the DynamoDB operations required by implemented routes", () => {
     const template = synthesize().toJSON();
     const serialized = JSON.stringify(template);
 
+    expect(serialized).toContain("dynamodb:BatchGetItem");
     expect(serialized).toContain("dynamodb:GetItem");
+    expect(serialized).toContain("dynamodb:Query");
     expect(serialized).toContain("dynamodb:TransactWriteItems");
     expect(serialized).not.toContain("dynamodb:*");
     expect(serialized).not.toContain("dynamodb:Scan");

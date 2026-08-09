@@ -25,5 +25,6 @@ describe("Next.js public delivery configuration", () => {
     expect(cacheValue("/api/:path*")).toBeUndefined();
     expect(cacheValue("/onboarding")).toBe("private, no-store, max-age=0");
     expect(cacheValue("/me/:path*")).toBe("private, no-store, max-age=0");
+    expect(cacheValue("/admin/:path*")).toBe("private, no-store, max-age=0");
   });
 });

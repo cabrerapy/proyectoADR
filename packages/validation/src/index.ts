@@ -13,4 +13,5 @@ export type ValidationResult<T> =
       readonly issues: NonEmptyReadonlyArray<ValidationIssue>;
     };
 
+export * from "./admin-student";
 export * from "./profile";

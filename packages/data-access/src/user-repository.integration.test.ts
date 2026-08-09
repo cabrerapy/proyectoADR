@@ -6,6 +6,7 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
+  AuditLogRepository,
   createDynamoDbAdapter,
   SearchTokenService,
   UserRepository,
@@ -31,6 +32,7 @@ const rotatedSearchTokens = new SearchTokenService([
 ]);
 const legacyRepository = new UserRepository(adapter, tableName, legacySearchTokens);
 const repository = new UserRepository(adapter, tableName, rotatedSearchTokens);
+const audit = new AuditLogRepository(adapter, tableName);
 
 const pendingUser = {
   cognitoSub: "google-subject-001",
@@ -241,5 +243,90 @@ describe.skipIf(!enabled)("UserRepository with DynamoDB Local", () => {
       version: 3,
     });
     expect(stored?.phone).not.toBe("+595981111111");
+  });
+
+  it("changes student status and appends exactly one audit record atomically", async () => {
+    const reviewUser = {
+      ...pendingUser,
+      cognitoSub: "google-subject-review",
+      email: "review@example.com",
+      userId: "user-review",
+    };
+    await repository.createPending(reviewUser);
+    await repository.completePendingProfile({
+      displayName: "Rosa Martínez",
+      expectedVersion: 1,
+      onboardingCompletedAt: "2026-08-08T12:20:00Z",
+      phone: "+595981444444",
+      userId: reviewUser.userId,
+    });
+
+    await expect(repository.transitionStatus({
+      actorId: "admin-1",
+      auditId: "audit-review-1",
+      correlationId: "request-review-1",
+      expectedVersion: 2,
+      status: "ACTIVE",
+      transitionedAt: "2026-08-08T13:00:00Z",
+      userId: reviewUser.userId,
+    })).resolves.toMatchObject({ status: "ACTIVE", version: 3 });
+    await expect(repository.listByStatus("ACTIVE"))
+      .resolves.toMatchObject({ profiles: expect.arrayContaining([expect.objectContaining({ id: reviewUser.userId })]) });
+    await expect(audit.listByEntity(
+      "UserProfile",
+      reviewUser.userId,
+      "2026-08-08T00:00:00Z",
+      "2026-08-08T23:59:59Z",
+    )).resolves.toMatchObject({
+      entries: [{
+        action: "STUDENT_APPLICATION_APPROVED",
+        actorId: "admin-1",
+        details: { fromStatus: "PENDING", toStatus: "ACTIVE" },
+        targetId: reviewUser.userId,
+      }],
+    });
+  });
+
+  it("allows one concurrent review winner without duplicate audit records", async () => {
+    const reviewUser = {
+      ...pendingUser,
+      cognitoSub: "google-subject-concurrent-review",
+      email: "concurrent-review@example.com",
+      userId: "user-concurrent-review",
+    };
+    await repository.createPending(reviewUser);
+    await repository.completePendingProfile({
+      displayName: "Carlos Vera",
+      expectedVersion: 1,
+      onboardingCompletedAt: "2026-08-08T12:20:00Z",
+      phone: "+595981555555",
+      userId: reviewUser.userId,
+    });
+    const base = {
+      actorId: "admin-1",
+      correlationId: "request-concurrent-review",
+      expectedVersion: 2,
+      transitionedAt: "2026-08-08T13:10:00Z",
+      userId: reviewUser.userId,
+    } as const;
+    const results = await Promise.allSettled([
+      repository.transitionStatus({ ...base, auditId: "audit-approve", status: "ACTIVE" }),
+      repository.transitionStatus({
+        ...base,
+        auditId: "audit-reject",
+        reason: "Datos insuficientes",
+        status: "REJECTED",
+      }),
+    ]);
+
+    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(({ status }) => status === "rejected")).toHaveLength(1);
+    const logs = await audit.listByEntity(
+      "UserProfile",
+      reviewUser.userId,
+      "2026-08-08T00:00:00Z",
+      "2026-08-08T23:59:59Z",
+    );
+    expect(logs.entries).toHaveLength(1);
   });
 });

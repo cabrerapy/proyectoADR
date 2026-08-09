@@ -35,6 +35,10 @@ const nextConfig: NextConfig = {
         headers: [{ key: "Cache-Control", value: privateCacheControl }],
         source: "/me/:path*",
       },
+      {
+        headers: [{ key: "Cache-Control", value: privateCacheControl }],
+        source: "/admin/:path*",
+      },
     ];
   },
   images: {

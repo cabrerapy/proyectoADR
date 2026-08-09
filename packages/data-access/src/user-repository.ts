@@ -1,8 +1,13 @@
 import type { UserProfile, UserRole, UserStatus } from "@gym-adr/domain";
-import { USER_ROLES, USER_STATUSES } from "@gym-adr/domain";
+import {
+  USER_ROLES,
+  USER_STATUSES,
+  canTransitionUserStatus,
+} from "@gym-adr/domain";
 import { NumberValue, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 
 import { BaseDynamoDbRepository } from "./base-repository";
+import { AuditLogRepository } from "./audit-log-repository";
 import type {
   DynamoDbDocumentPort,
   DynamoDbItem,
@@ -70,6 +75,17 @@ export interface UpdateUserProfileInput {
   readonly roles: readonly UserRole[];
   readonly status: UserStatus;
   readonly updatedAt: string;
+  readonly userId: string;
+}
+
+export interface TransitionUserStatusInput {
+  readonly actorId: string;
+  readonly auditId: string;
+  readonly correlationId: string;
+  readonly expectedVersion: number;
+  readonly reason?: string;
+  readonly status: UserStatus;
+  readonly transitionedAt: string;
   readonly userId: string;
 }
 
@@ -443,6 +459,108 @@ export class UserRepository {
       updatedAt: input.updatedAt,
       userId: input.userId,
     });
+  }
+
+  async transitionStatus(input: TransitionUserStatusInput): Promise<UserProfile> {
+    if (input.actorId === input.userId) {
+      throw new DynamoDbRepositoryError(
+        "USER_STATUS_INVALID",
+        "Un administrador no puede cambiar su propio estado.",
+      );
+    }
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1 || !isStatus(input.status)) {
+      throw invalidDynamoDbInput("La transición de estado no es válida.");
+    }
+    const key = this.safeProfileKey(input.userId);
+    const item = await this.base.get(key, true);
+    if (item === undefined) {
+      throw new DynamoDbRepositoryError("RESOURCE_NOT_FOUND", "El perfil solicitado no existe.");
+    }
+    const current = this.readProfileItem(item, key);
+    if (current.status === "PENDING" && input.status === "ACTIVE" && current.onboardingCompletedAt === undefined) {
+      throw userError("USER_ONBOARDING_INCOMPLETE", "La solicitud todavía no tiene los datos obligatorios.");
+    }
+    if (["REJECTED", "SUSPENDED", "INACTIVE"].includes(input.status) && input.reason === undefined) {
+      throw invalidDynamoDbInput("El motivo de la transición es obligatorio.");
+    }
+    if (!current.roles.includes("STUDENT") || !canTransitionUserStatus(current.status, input.status)) {
+      throw userError("USER_STATUS_INVALID", "La transición de estado no está permitida.");
+    }
+    if (current.version !== input.expectedVersion) {
+      throw userError("USER_VERSION_CONFLICT", "El perfil fue modificado por otra operación.");
+    }
+    const transitionedAt = timestamp(input.transitionedAt, "transitionedAt");
+    if (transitionedAt < current.updatedAt) {
+      throw invalidDynamoDbInput("La fecha de transición no puede ser anterior al perfil vigente.");
+    }
+    const nextVersion = input.expectedVersion + 1;
+    const index = operationalIndexKeys.userStatus(
+      input.status,
+      shardForId(input.userId),
+      current.createdAt,
+      input.userId,
+    );
+    const audit = new AuditLogRepository(this.document, this.tableName).createAppendAction({
+      action: current.status === "PENDING"
+        ? (input.status === "ACTIVE" ? "STUDENT_APPLICATION_APPROVED" : "STUDENT_APPLICATION_REJECTED")
+        : `STUDENT_STATUS_${input.status}`,
+      actorId: input.actorId,
+      auditId: input.auditId,
+      correlationId: input.correlationId,
+      details: {
+        fromStatus: current.status,
+        toStatus: input.status,
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
+      },
+      result: "SUCCEEDED",
+      targetId: input.userId,
+      targetType: "UserProfile",
+      timestamp: transitionedAt,
+    }).action;
+    try {
+      await this.document.transactWrite({
+        TransactItems: [
+          {
+            Update: {
+              ConditionExpression: "attribute_exists(#pk) AND #status = :currentStatus AND #version = :expectedVersion",
+              ExpressionAttributeNames: {
+                "#gsi1pk": "GSI1PK",
+                "#gsi1sk": "GSI1SK",
+                "#pk": "PK",
+                "#status": "status",
+                "#updatedAt": "updatedAt",
+                "#version": "version",
+              },
+              ExpressionAttributeValues: {
+                ":currentStatus": current.status,
+                ":expectedVersion": input.expectedVersion,
+                ":gsi1pk": index.PK,
+                ":gsi1sk": index.SK,
+                ":nextStatus": input.status,
+                ":nextVersion": nextVersion,
+                ":updatedAt": transitionedAt,
+              },
+              Key: key,
+              TableName: this.tableName,
+              UpdateExpression: "SET #status = :nextStatus, #updatedAt = :updatedAt, #version = :nextVersion, #gsi1pk = :gsi1pk, #gsi1sk = :gsi1sk",
+            },
+          },
+          audit,
+        ],
+      });
+    } catch (error) {
+      const mapped = mapDynamoDbError(error);
+      if (mapped.code === "TRANSACTION_CANCELLED" || mapped.code === "CONDITIONAL_CHECK_FAILED") {
+        throw userError("USER_VERSION_CONFLICT", "El perfil fue modificado por otra operación.");
+      }
+      throw mapped;
+    }
+    return {
+      ...this.toDomain(current),
+      status: input.status,
+      updatedAt: transitionedAt,
+      version: nextVersion,
+    };
   }
 
   destroy(): void {

@@ -4,11 +4,20 @@ import {
   DynamoDbRepositoryError,
   type CompletePendingProfileInput,
   type CreatePendingUserResult,
+  type TransitionUserStatusInput,
   type UpdateOwnUserProfileInput,
+  type UserPage,
 } from "@gym-adr/data-access";
-import { AuthorizationDeniedError, type UserProfile } from "@gym-adr/domain";
+import {
+  USER_STATUSES,
+  AuthorizationDeniedError,
+  type UserProfile,
+  type UserStatus,
+} from "@gym-adr/domain";
 import type {
+  AdminStudentQuery,
   CompleteProfileInput,
+  TransitionStudentStatusInput,
   UpdateOwnProfileInput,
 } from "@gym-adr/validation";
 
@@ -37,7 +46,16 @@ export interface PendingUserPort {
     readonly userId: string;
   }): Promise<CreatePendingUserResult>;
   completePendingProfile(input: CompletePendingProfileInput): Promise<UserProfile>;
+  findByEmail(email: string): Promise<UserProfile | undefined>;
   findByCognitoSub(cognitoSub: string): Promise<UserProfile | undefined>;
+  getById(userId: string, consistentRead?: boolean): Promise<UserProfile | undefined>;
+  listByStatus(status: UserStatus, options?: {
+    readonly cursors?: NonNullable<UserPage["cursors"]>;
+  }): Promise<UserPage>;
+  searchByName(prefix: string, options?: {
+    readonly cursors?: NonNullable<UserPage["cursors"]>;
+  }): Promise<UserPage>;
+  transitionStatus(input: TransitionUserStatusInput): Promise<UserProfile>;
   updateOwn(input: UpdateOwnUserProfileInput): Promise<UserProfile>;
 }
 
@@ -61,6 +79,28 @@ export interface OwnProfileView {
   readonly status: UserProfile["status"];
   readonly updatedAt: string;
   readonly version: number;
+}
+
+export interface AdminStudentView {
+  readonly createdAt: string;
+  readonly displayName: string;
+  readonly email?: string;
+  readonly id: string;
+  readonly onboardingCompleted: boolean;
+  readonly phone?: string;
+  readonly roles?: UserProfile["roles"];
+  readonly status: UserStatus;
+  readonly updatedAt: string;
+  readonly version: number;
+}
+
+export interface AdminStudentPage {
+  readonly capabilities: {
+    readonly canManageStatus: boolean;
+    readonly canReadFull: boolean;
+  };
+  readonly cursor?: string;
+  readonly students: readonly AdminStudentView[];
 }
 
 export interface AuthServiceDependencies {
@@ -99,6 +139,74 @@ const toOwnProfile = (profile: UserProfile): OwnProfileView => ({
   updatedAt: profile.updatedAt,
   version: profile.version,
 });
+
+type UserCursors = NonNullable<UserPage["cursors"]>;
+
+const toAdminStudent = (profile: UserProfile, full: boolean): AdminStudentView => ({
+  createdAt: profile.createdAt,
+  displayName: profile.displayName,
+  id: profile.id,
+  onboardingCompleted: profile.onboardingCompletedAt !== undefined,
+  status: profile.status,
+  updatedAt: profile.updatedAt,
+  version: profile.version,
+  ...(full
+    ? {
+        email: profile.email,
+        ...(profile.phone === undefined ? {} : { phone: profile.phone }),
+        roles: profile.roles,
+      }
+    : {}),
+});
+
+const queryIdentity = (query: AdminStudentQuery): string =>
+  `${query.filter}:${query.value ?? ""}`;
+
+const isCursorKey = (value: unknown): value is Readonly<Record<string, string>> => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const entries = Object.entries(value);
+  return entries.length >= 2 && entries.length <= 4 && entries.every(
+    ([key, item]) => ["PK", "SK", "GSI1PK", "GSI1SK"].includes(key) &&
+      typeof item === "string" && item.length > 0 && item.length <= 1_024,
+  );
+};
+
+const decodeCursor = (cursor: string | undefined, query: AdminStudentQuery): UserCursors | undefined => {
+  if (cursor === undefined) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error();
+    const record = parsed as Record<string, unknown>;
+    if (record.query !== queryIdentity(query) || typeof record.cursors !== "object" || record.cursors === null || Array.isArray(record.cursors)) throw new Error();
+    const cursors = record.cursors as Record<string, unknown>;
+    const entries = Object.entries(cursors);
+    if (entries.length > 8 || !entries.every(([key, value]) => /^(?:S0[0-3]|v\d+:S0[0-3])$/u.test(key) && isCursorKey(value))) throw new Error();
+    for (const [cursorKey, value] of entries) {
+      const key = value as Readonly<Record<string, string>>;
+      if (query.filter === "name") {
+        const [version, shard] = cursorKey.split(":");
+        if (version === undefined || shard === undefined || !key.PK?.startsWith(`LOOKUP#NAME#${version}#`) || !key.PK.endsWith(`#${shard}`) || !key.SK?.startsWith("USER#")) throw new Error();
+      } else {
+        const status = query.filter === "pending" ? "PENDING" : query.value;
+        if (!key.PK?.startsWith("USER#") || key.SK !== "PROFILE" || key.GSI1PK !== `USER_STATUS#${status}#${cursorKey}` || !key.GSI1SK?.startsWith("CREATED#")) throw new Error();
+      }
+    }
+    return cursors as UserCursors;
+  } catch {
+    throw new ApiError(422, apiErrorCodes.validationError, "El cursor de paginación no es válido.");
+  }
+};
+
+const encodeCursor = (query: AdminStudentQuery, cursors: UserPage["cursors"]): string | undefined =>
+  cursors === undefined
+    ? undefined
+    : Buffer.from(JSON.stringify({ cursors, query: queryIdentity(query) }), "utf8").toString("base64url");
+
+const statusFromQuery = (value: string | undefined): UserStatus => {
+  const status = USER_STATUSES.find((candidate) => candidate === value);
+  if (status !== undefined) return status;
+  throw new ApiError(422, apiErrorCodes.validationError, "El estado solicitado no es válido.");
+};
 
 export class AuthService {
   private readonly clock: () => Date;
@@ -284,6 +392,99 @@ export class AuthService {
         }
       }
       throw new ApiError(502, apiErrorCodes.internalError, "No fue posible actualizar el perfil.");
+    }
+  }
+
+  async listAdminStudents(
+    request: Request,
+    query: AdminStudentQuery,
+  ): Promise<AdminStudentPage> {
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "student-list"), 60);
+    const full = principal.roles.includes("ADMIN");
+    try {
+      const scope = new AuthorizedRepositoryScope(principalFromProfile(principal));
+      scope.require(full ? "STUDENT_PROFILE_READ_FULL" : "STUDENT_PROFILE_READ_OPERATIONAL");
+      if (query.filter === "email" && !full) scope.require("STUDENT_PROFILE_READ_FULL");
+      const cursors = decodeCursor(query.cursor, query);
+      let page: UserPage;
+      if (query.filter === "email") {
+        const profile = await this.dependencies.users.findByEmail(query.value ?? "");
+        page = { profiles: profile === undefined ? [] : [profile] };
+      } else if (query.filter === "name") {
+        page = await this.dependencies.users.searchByName(query.value ?? "", { ...(cursors === undefined ? {} : { cursors }) });
+      } else {
+        const status = query.filter === "pending" ? "PENDING" : statusFromQuery(query.value);
+        page = await this.dependencies.users.listByStatus(status, { ...(cursors === undefined ? {} : { cursors }) });
+      }
+      const students = page.profiles
+        .filter((profile) => profile.roles.includes("STUDENT"))
+        .map((profile) => toAdminStudent(profile, full));
+      const cursor = encodeCursor(query, page.cursors);
+      return {
+        capabilities: { canManageStatus: full, canReadFull: full },
+        ...(cursor === undefined ? {} : { cursor }),
+        students,
+      };
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible consultar los alumnos.");
+    }
+  }
+
+  async getAdminStudent(request: Request, userId: string): Promise<AdminStudentView> {
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "student-detail"), 60);
+    const full = principal.roles.includes("ADMIN");
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal))
+        .require(full ? "STUDENT_PROFILE_READ_FULL" : "STUDENT_PROFILE_READ_OPERATIONAL");
+      const profile = await this.dependencies.users.getById(userId, true);
+      if (profile === undefined || !profile.roles.includes("STUDENT")) {
+        throw new ApiError(404, apiErrorCodes.notFound, "No se encontró el alumno solicitado.");
+      }
+      return toAdminStudent(profile, full);
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible consultar el alumno.");
+    }
+  }
+
+  async transitionAdminStudent(
+    request: Request,
+    correlationId: string,
+    userId: string,
+    input: TransitionStudentStatusInput,
+  ): Promise<AdminStudentView> {
+    this.assertSameOrigin(request);
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "student-transition"), 20);
+    try {
+      const scope = new AuthorizedRepositoryScope(principalFromProfile(principal));
+      scope.require("STUDENT_ROLE_STATUS_MANAGE");
+      const current = await this.dependencies.users.getById(userId, true);
+      if (current === undefined || !current.roles.includes("STUDENT")) {
+        throw new ApiError(404, apiErrorCodes.notFound, "No se encontró el alumno solicitado.");
+      }
+      scope.require(current.status === "PENDING" ? "STUDENT_APPLICATION_REVIEW" : "STUDENT_ROLE_STATUS_MANAGE");
+      if (principal.id === userId) throw new AuthorizationDeniedError("NOT_OWNER");
+      return toAdminStudent(await this.dependencies.users.transitionStatus({
+        ...input,
+        actorId: principal.id,
+        auditId: this.ids(),
+        correlationId,
+        transitionedAt: this.clock().toISOString(),
+        userId,
+      }), true);
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      if (error instanceof DynamoDbRepositoryError && ["USER_ONBOARDING_INCOMPLETE", "USER_STATUS_INVALID", "USER_VERSION_CONFLICT"].includes(error.code)) {
+        throw new ApiError(409, apiErrorCodes.conflict, "El estado del alumno cambió o la transición no está permitida.");
+      }
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible actualizar el estado del alumno.");
     }
   }
 

@@ -9,6 +9,7 @@ import {
   type AuthorizationAction,
   type AuthorizationPrincipal,
 } from "./authorization";
+import { canTransitionUserStatus } from "./user";
 
 const principal = (
   roles: AuthorizationPrincipal["roles"],
@@ -115,6 +116,19 @@ describe("authorization matrix", () => {
       action: "PAYMENT_RECORD",
       principal: principal(["STUDENT", "STAFF"], "SUSPENDED"),
     })).toEqual({ allowed: false, reason: "STATUS_DENIED" });
+  });
+});
+
+describe("student status transitions", () => {
+  it("accepts only the approved lifecycle edges", () => {
+    expect(canTransitionUserStatus("PENDING", "ACTIVE")).toBe(true);
+    expect(canTransitionUserStatus("PENDING", "REJECTED")).toBe(true);
+    expect(canTransitionUserStatus("ACTIVE", "SUSPENDED")).toBe(true);
+    expect(canTransitionUserStatus("ACTIVE", "INACTIVE")).toBe(true);
+    expect(canTransitionUserStatus("SUSPENDED", "ACTIVE")).toBe(true);
+    expect(canTransitionUserStatus("INACTIVE", "ACTIVE")).toBe(true);
+    expect(canTransitionUserStatus("REJECTED", "ACTIVE")).toBe(false);
+    expect(canTransitionUserStatus("ACTIVE", "PENDING")).toBe(false);
   });
 });
 

@@ -133,7 +133,7 @@ describe("DynamoDB table", () => {
     });
   });
 
-  it("applies mandatory tags and grants only callback DynamoDB operations", () => {
+  it("applies mandatory tags and grants only implemented DynamoDB operations", () => {
     const template = synthesize("development");
     template.hasResourceProperties("AWS::DynamoDB::Table", {
       Tags: Match.arrayWith([
@@ -153,8 +153,11 @@ describe("DynamoDB table", () => {
       (resource) => resource.Type === "AWS::IAM::Policy",
     );
     const serialized = JSON.stringify(policies);
+    expect(serialized).toContain("dynamodb:BatchGetItem");
     expect(serialized).toContain("dynamodb:GetItem");
+    expect(serialized).toContain("dynamodb:Query");
     expect(serialized).toContain("dynamodb:TransactWriteItems");
+    expect(serialized).toContain("/index/*");
     expect(serialized).not.toContain("dynamodb:*");
     expect(serialized).not.toContain("dynamodb:Scan");
   });
