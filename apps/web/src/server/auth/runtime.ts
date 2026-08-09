@@ -5,6 +5,7 @@ import {
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import {
   createDynamoDbAdapter,
+  MembershipPlanRepository,
   SearchTokenService,
   UserRepository,
 } from "@gym-adr/data-access";
@@ -103,6 +104,7 @@ const createService = async (): Promise<AuthService> => {
   return new AuthService({
     config,
     rateLimiter: limiter,
+    plans: new MembershipPlanRepository(adapter, tableName),
     tokens: new CognitoTokenClient(config),
     users,
   });

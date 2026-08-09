@@ -169,6 +169,12 @@ describe("DynamoDB key catalog", () => {
         "S02",
         "membership-01",
       ),
+      plan: operationalIndexKeys.planStatus(
+        "ACTIVE",
+        "S03",
+        "plan-mensual",
+        "plan-01",
+      ),
       reservation: relationshipIndexKeys.reservationByStudent(
         "user-01",
         "2026-08-10T22:00:00.000Z",
@@ -186,6 +192,10 @@ describe("DynamoDB key catalog", () => {
       due: {
         PK: "MEMBERSHIP_DUE#2026-08-10#S02",
         SK: "MEMBERSHIP#membership-01",
+      },
+      plan: {
+        PK: "PLAN_STATUS#ACTIVE#S03",
+        SK: "NAME#plan-mensual#PLAN#plan-01",
       },
       reservation: {
         PK: "USER#user-01",

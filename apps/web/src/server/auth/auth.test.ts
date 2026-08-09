@@ -5,17 +5,20 @@ import {
   SignJWT,
 } from "jose";
 import type { CreatePendingUserResult } from "@gym-adr/data-access";
-import type { UserProfile } from "@gym-adr/domain";
+import type { MembershipPlan, UserProfile } from "@gym-adr/domain";
 import {
   validateAdminStudentQuery,
   validateCompleteProfile,
+  validateCreateMembershipPlan,
+  validateMembershipPlanQuery,
   validateTransitionStudentStatus,
+  validateUpdateMembershipPlan,
   validateUpdateOwnProfile,
 } from "@gym-adr/validation";
 import { describe, expect, it, vi } from "vitest";
 
 import { resolveAuthConfig, type AuthConfig } from "./auth-config";
-import { AuthService, type PendingUserPort } from "./auth-service";
+import { AuthService, type MembershipPlanPort, type PendingUserPort } from "./auth-service";
 import { CognitoTokenClient, type CognitoTokenPort } from "./cognito-client";
 import { oauthCookieNames, sessionCookieName } from "./cookies";
 import { FixedWindowRateLimiter } from "./rate-limiter";
@@ -166,16 +169,60 @@ describe("OAuth session service", () => {
       verifyIdToken: vi.fn(async () => identity),
       verifySessionToken: vi.fn(async () => identity),
     };
+    const plans = new Map<string, MembershipPlan>();
+    const planPort: MembershipPlanPort = {
+      create: vi.fn(async (input) => {
+        const plan: MembershipPlan = {
+          createdAt: input.createdAt,
+          createdBy: input.actorId,
+          currency: input.currency,
+          ...(input.description === undefined ? {} : { description: input.description }),
+          frequency: input.frequency,
+          id: input.planId,
+          name: input.name,
+          price: input.price,
+          status: "ACTIVE",
+          updatedAt: input.createdAt,
+          updatedBy: input.actorId,
+          version: 1,
+        };
+        plans.set(plan.id, plan);
+        return plan;
+      }),
+      getById: vi.fn(async (planId) => plans.get(planId)),
+      list: vi.fn(async (status = "ALL") => ({
+        plans: [...plans.values()].filter((plan) => status === "ALL" || plan.status === status),
+      })),
+      update: vi.fn(async (input) => {
+        const current = plans.get(input.planId);
+        if (current === undefined) throw new Error("missing test plan");
+        const plan: MembershipPlan = {
+          ...current,
+          currency: input.currency,
+          ...(input.description === undefined ? {} : { description: input.description }),
+          frequency: input.frequency,
+          name: input.name,
+          price: input.price,
+          status: input.status,
+          updatedAt: input.updatedAt,
+          updatedBy: input.actorId,
+          version: input.expectedVersion + 1,
+        };
+        plans.set(plan.id, plan);
+        return plan;
+      }),
+    };
     let sequence = 0;
     const service = new AuthService({
       clock: () => new Date("2026-08-08T12:00:00Z"),
       config,
       ids: () => `user-${++sequence}`,
+      plans: planPort,
       rateLimiter,
       tokens,
       users: userPort,
     });
-    return { completed, service, tokens, userPort, users };
+    return { completed, planPort, plans, service, tokens, userPort, users };
   };
 
   it("starts authorization with state, nonce, S256 PKCE and hardened cookies", () => {
@@ -676,6 +723,91 @@ describe("OAuth session service", () => {
     expect(response.headers.get("location")).toContain("/logout?");
     expect(response.headers.getSetCookie().join(";")).toContain("Max-Age=0");
   });
+
+  it("lets an active ADMIN create, edit and logically deactivate an audited plan", async () => {
+    const { completed, planPort, service, userPort } = setup();
+    const actor = { ...identity, createdAt: "2026-08-08T12:00:00Z", userId: "admin-1" };
+    await userPort.createPending(actor);
+    completed.set(actor.userId, {
+      createdAt: actor.createdAt,
+      displayName: "Administradora",
+      email: actor.email,
+      emailVerified: true,
+      id: actor.userId,
+      roles: ["ADMIN"],
+      status: "ACTIVE",
+      updatedAt: actor.createdAt,
+      version: 2,
+    });
+    const request = new Request("https://app.example.com/api/v1/admin/plans", {
+      headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token`, origin: config.appBaseUrl },
+      method: "POST",
+    });
+    const created = await service.createAdminMembershipPlan(request, "correlation-1", {
+      currency: "PYG",
+      description: "Acceso mensual",
+      frequency: "MONTHLY",
+      name: "Plan mensual",
+      price: 250_000,
+    });
+    expect(planPort.create).toHaveBeenCalledWith(expect.objectContaining({ actorId: actor.userId }));
+    await expect(service.listAdminMembershipPlans(request, { status: "ACTIVE" }))
+      .resolves.toMatchObject({ capabilities: { canManage: true }, plans: [{ id: created.id }] });
+    await expect(service.updateAdminMembershipPlan(request, "correlation-2", created.id, {
+      currency: "PYG",
+      frequency: "MONTHLY",
+      name: "Plan mensual actualizado",
+      price: 275_000,
+      expectedVersion: 1,
+      status: "INACTIVE",
+    })).resolves.toMatchObject({ status: "INACTIVE", version: 2 });
+    expect(planPort.update).toHaveBeenCalledWith(expect.objectContaining({ actorId: actor.userId, planId: created.id }));
+  });
+
+  it("allows active STAFF to read plans but denies mutations and denies inactive ADMIN", async () => {
+    for (const scenario of [
+      { canRead: true, roles: ["STAFF"] as const, status: "ACTIVE" as const },
+      { canRead: false, roles: ["STUDENT"] as const, status: "ACTIVE" as const },
+      { canRead: false, roles: ["ADMIN"] as const, status: "PENDING" as const },
+      { canRead: false, roles: ["ADMIN"] as const, status: "SUSPENDED" as const },
+      { canRead: false, roles: ["ADMIN"] as const, status: "INACTIVE" as const },
+    ]) {
+      const { completed, planPort, service, userPort } = setup();
+      const actor = { ...identity, createdAt: "2026-08-08T12:00:00Z", userId: `actor-${scenario.status}-${scenario.roles[0]}` };
+      await userPort.createPending(actor);
+      completed.set(actor.userId, {
+        createdAt: actor.createdAt,
+        displayName: "Actor",
+        email: actor.email,
+        emailVerified: true,
+        id: actor.userId,
+        roles: scenario.roles,
+        status: scenario.status,
+        updatedAt: actor.createdAt,
+        version: 2,
+      });
+      const request = new Request("https://app.example.com/api/v1/admin/plans", {
+        headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token`, origin: config.appBaseUrl },
+        method: "POST",
+      });
+      if (scenario.canRead) {
+        await expect(service.listAdminMembershipPlans(request, { status: "ALL" }))
+          .resolves.toMatchObject({ capabilities: { canManage: false } });
+      } else {
+        await expect(service.listAdminMembershipPlans(request, { status: "ALL" }))
+          .rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+      }
+      await expect(service.createAdminMembershipPlan(request, "correlation-1", {
+        currency: "PYG", frequency: "MONTHLY", name: "No permitido", price: 1,
+      })).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+      expect(planPort.create).not.toHaveBeenCalled();
+    }
+    const { service } = setup();
+    await expect(service.listAdminMembershipPlans(
+      new Request("https://app.example.com/api/v1/admin/plans"),
+      { status: "ALL" },
+    )).rejects.toMatchObject({ code: "AUTHENTICATION_REQUIRED", status: 401 });
+  });
 });
 
 describe("onboarding validation", () => {
@@ -749,6 +881,27 @@ describe("onboarding validation", () => {
       expectedVersion: 2,
       status: "ACTIVE",
     })).toMatchObject({ success: false });
+  });
+
+  it("validates plan commands and rejects protected or invalid fields", () => {
+    expect(validateCreateMembershipPlan({
+      currency: "PYG",
+      description: "  Acceso   mensual ",
+      frequency: "MONTHLY",
+      name: " Plan mensual ",
+      price: 250_000,
+    })).toEqual({
+      data: { currency: "PYG", description: "Acceso mensual", frequency: "MONTHLY", name: "Plan mensual", price: 250_000 },
+      success: true,
+    });
+    expect(validateCreateMembershipPlan({ currency: "USD", frequency: "MONTHLY", name: "X", price: 1, actorId: "attacker" }))
+      .toMatchObject({ success: false });
+    expect(validateUpdateMembershipPlan({ currency: "PYG", expectedVersion: 2, frequency: "ANNUAL", name: "Anual", price: 2_000_000, status: "INACTIVE" }))
+      .toMatchObject({ data: { expectedVersion: 2, status: "INACTIVE" }, success: true });
+    expect(validateMembershipPlanQuery(new URLSearchParams("status=ACTIVE")))
+      .toEqual({ data: { status: "ACTIVE" }, success: true });
+    expect(validateMembershipPlanQuery(new URLSearchParams("status=ACTIVE&userId=other")))
+      .toMatchObject({ success: false });
   });
 });
 

@@ -30,7 +30,7 @@ Actores:
 ### Alumno, planes, membresías y pagos
 
 - **REQ-MEMBER-001**: el alumno consulta su propio perfil, ingreso, plan, estado/vencimiento de membresía y edita solo campos permitidos (contacto y preferencias; no rol, estado, ingreso ni datos financieros).
-- **REQ-MEMBER-002**: administrar planes y membresías separadas del alumno. Cada membresía incluye plan, inicio, vencimiento, estado, importe esperado, `PYG`, frecuencia, creador y timestamps.
+- **REQ-MEMBER-002**: administrar planes y membresías separadas del alumno. Los planes se crean, consultan, editan y desactivan lógicamente con control de versión y auditoría; solo `ADMIN` puede mutarlos y `STAFF` activo puede consultarlos. Desactivar o editar un plan no altera membresías históricas. Cada membresía incluye plan, inicio, vencimiento, estado, importe esperado, `PYG`, frecuencia, creador y timestamps.
 - **REQ-MEMBER-003**: identificar membresías próximas a vencer y alumnos atrasados mediante filtros reproducibles; la vigencia se determina por estado `ACTIVE` y rango temporal en `America/Asuncion`.
 - **REQ-PAY-001**: `STAFF` autorizado o `ADMIN` registra pagos manuales con alumno, membresía, fecha, importe entero, moneda, método, periodo, comprobante opcional, estado, actor y observaciones.
 - **REQ-PAY-002**: pagos `CONFIRMED` no se eliminan ni editan de forma destructiva. Correcciones se realizan por anulación auditada, ajuste o asiento compensatorio que referencia el original.

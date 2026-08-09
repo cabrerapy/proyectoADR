@@ -195,6 +195,16 @@ export const operationalIndexKeys = {
       `PAYMENT_STATUS#${id(status, "status")}#${shard}`,
       `AT#${assertTimestamp(paidAt, "paidAt")}#PAYMENT#${id(paymentId, "paymentId")}`,
     ),
+  planStatus: (
+    status: string,
+    shard: Shard,
+    normalizedName: string,
+    planId: string,
+  ): IndexKey =>
+    indexKey(
+      `PLAN_STATUS#${id(status, "status")}#${shard}`,
+      `NAME#${id(normalizedName, "normalizedName")}#PLAN#${id(planId, "planId")}`,
+    ),
   userStatus: (
     status: string,
     shard: Shard,

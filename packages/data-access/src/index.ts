@@ -17,6 +17,7 @@ export * from "./model-shards";
 export * from "./model-types";
 export * from "./model-validation";
 export * from "./payment-repository";
+export * from "./membership-plan-repository";
 export * from "./notification-repository";
 export * from "./reservation-repository";
 export * from "./search-tokens";

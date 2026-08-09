@@ -19,6 +19,25 @@ export const MEMBERSHIP_FREQUENCIES = [
 
 export type MembershipFrequency = (typeof MEMBERSHIP_FREQUENCIES)[number];
 
+export const MEMBERSHIP_PLAN_STATUSES = ["ACTIVE", "INACTIVE"] as const;
+
+export type MembershipPlanStatus = (typeof MEMBERSHIP_PLAN_STATUSES)[number];
+
+export interface MembershipPlan {
+  readonly createdAt: string;
+  readonly createdBy: EntityId;
+  readonly currency: string;
+  readonly description?: string;
+  readonly frequency: MembershipFrequency;
+  readonly id: EntityId;
+  readonly name: string;
+  readonly price: number;
+  readonly status: MembershipPlanStatus;
+  readonly updatedAt: string;
+  readonly updatedBy: EntityId;
+  readonly version: number;
+}
+
 export interface Membership {
   readonly createdAt: string;
   readonly createdBy: EntityId;

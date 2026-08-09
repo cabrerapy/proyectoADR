@@ -24,7 +24,7 @@ Usar elementos canónicos y vistas con estos caminos:
 - `GSI2-Relationships`: sesiones por entrenador, reservas por alumno y auditoría por actor.
 - Base por entidad/fecha para auditoría y base por mes/shard para galería pública.
 
-La tabla completa de 25 patrones, claves, operación, índice, consistencia y costo está en la sección 6 de `design.md` y forma parte de esta decisión.
+El catálogo completo y vigente de patrones, claves, operación, índice, consistencia y costo está en la sección 6 de `design.md` y forma parte de esta decisión.
 
 ## Consistencia
 
@@ -66,4 +66,3 @@ Dos índices reutilizables y vistas explícitas equilibran costo, mantenibilidad
 - Conflictos sobre metadata de clase: reintentos con jitter e idempotencia; capacidad del gimnasio limita contención.
 - Costos de vistas: métricas por comando, AWS Budgets y máximo On-Demand opcional.
 - Búsqueda por nombre no es full-text: prefijos HMAC acotados; un motor de búsqueda requeriría decisión futura.
-

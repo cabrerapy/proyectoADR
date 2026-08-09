@@ -3,21 +3,29 @@ import { randomUUID } from "node:crypto";
 import {
   DynamoDbRepositoryError,
   type CompletePendingProfileInput,
+  type CreateMembershipPlanInput,
   type CreatePendingUserResult,
+  type MembershipPlanCursors,
+  type MembershipPlanPage,
   type TransitionUserStatusInput,
+  type UpdateMembershipPlanInput,
   type UpdateOwnUserProfileInput,
   type UserPage,
 } from "@gym-adr/data-access";
 import {
   USER_STATUSES,
   AuthorizationDeniedError,
+  type MembershipPlan,
   type UserProfile,
   type UserStatus,
 } from "@gym-adr/domain";
 import type {
   AdminStudentQuery,
   CompleteProfileInput,
+  MembershipPlanCommand,
+  MembershipPlanQuery,
   TransitionStudentStatusInput,
+  UpdateMembershipPlanCommand,
   UpdateOwnProfileInput,
 } from "@gym-adr/validation";
 
@@ -57,6 +65,15 @@ export interface PendingUserPort {
   }): Promise<UserPage>;
   transitionStatus(input: TransitionUserStatusInput): Promise<UserProfile>;
   updateOwn(input: UpdateOwnUserProfileInput): Promise<UserProfile>;
+}
+
+export interface MembershipPlanPort {
+  create(input: CreateMembershipPlanInput): Promise<MembershipPlan>;
+  getById(planId: string, consistentRead?: boolean): Promise<MembershipPlan | undefined>;
+  list(status?: "ACTIVE" | "INACTIVE" | "ALL", options?: {
+    readonly cursors?: MembershipPlanCursors;
+  }): Promise<MembershipPlanPage>;
+  update(input: UpdateMembershipPlanInput): Promise<MembershipPlan>;
 }
 
 export interface OnboardingProfile {
@@ -103,10 +120,17 @@ export interface AdminStudentPage {
   readonly students: readonly AdminStudentView[];
 }
 
+export interface AdminMembershipPlanPage {
+  readonly capabilities: { readonly canManage: boolean };
+  readonly cursor?: string;
+  readonly plans: readonly MembershipPlan[];
+}
+
 export interface AuthServiceDependencies {
   readonly clock?: () => Date;
   readonly config: AuthConfig;
   readonly ids?: () => string;
+  readonly plans?: MembershipPlanPort;
   readonly rateLimiter: RateLimiter;
   readonly tokens: CognitoTokenPort;
   readonly users: PendingUserPort;
@@ -207,6 +231,40 @@ const statusFromQuery = (value: string | undefined): UserStatus => {
   if (status !== undefined) return status;
   throw new ApiError(422, apiErrorCodes.validationError, "El estado solicitado no es válido.");
 };
+
+const planQueryIdentity = (query: MembershipPlanQuery): string => query.status;
+
+const decodePlanCursor = (cursor: string | undefined, query: MembershipPlanQuery): MembershipPlanCursors | undefined => {
+  if (cursor === undefined) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error();
+    const record = parsed as Record<string, unknown>;
+    if (record.query !== planQueryIdentity(query) || typeof record.cursors !== "object" || record.cursors === null || Array.isArray(record.cursors)) throw new Error();
+    const cursors: Record<string, NonNullable<MembershipPlanCursors[string]> | null> = {};
+    for (const [cursorKey, raw] of Object.entries(record.cursors)) {
+      if (!/^(ACTIVE|INACTIVE):S0[0-3]$/u.test(cursorKey)) throw new Error();
+      if (raw === null) {
+        cursors[cursorKey] = null;
+        continue;
+      }
+      if (typeof raw !== "object" || Array.isArray(raw)) throw new Error();
+      const key = raw as Record<string, unknown>;
+      const [status, shard] = cursorKey.split(":");
+      if (typeof key.PK !== "string" || !key.PK.startsWith("PLAN#") || key.SK !== "METADATA" || key.GSI1PK !== `PLAN_STATUS#${status}#${shard}` || typeof key.GSI1SK !== "string" || !key.GSI1SK.startsWith("NAME#")) throw new Error();
+      cursors[cursorKey] = key;
+    }
+    const statuses = query.status === "ALL" ? ["ACTIVE", "INACTIVE"] : [query.status];
+    const expectedKeys = statuses.flatMap((status) => ["S00", "S01", "S02", "S03"].map((shard) => `${status}:${shard}`));
+    if (Object.keys(cursors).length !== expectedKeys.length || expectedKeys.some((key) => !(key in cursors))) throw new Error();
+    return cursors;
+  } catch {
+    throw new ApiError(422, apiErrorCodes.validationError, "El cursor de paginación no es válido.");
+  }
+};
+
+const encodePlanCursor = (query: MembershipPlanQuery, cursors: MembershipPlanPage["cursors"]): string | undefined =>
+  cursors === undefined ? undefined : Buffer.from(JSON.stringify({ cursors, query: planQueryIdentity(query) }), "utf8").toString("base64url");
 
 export class AuthService {
   private readonly clock: () => Date;
@@ -488,6 +546,107 @@ export class AuthService {
     }
   }
 
+  async listAdminMembershipPlans(
+    request: Request,
+    query: MembershipPlanQuery,
+  ): Promise<AdminMembershipPlanPage> {
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "plan-list"), 60);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("PLAN_READ");
+      const cursors = decodePlanCursor(query.cursor, query);
+      const page = await this.planRepository().list(query.status, {
+        ...(cursors === undefined ? {} : { cursors }),
+      });
+      const cursor = encodePlanCursor(query, page.cursors);
+      return {
+        capabilities: { canManage: principal.roles.includes("ADMIN") },
+        ...(cursor === undefined ? {} : { cursor }),
+        plans: page.plans,
+      };
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible consultar los planes.");
+    }
+  }
+
+  async getAdminMembershipPlan(request: Request, planId: string): Promise<MembershipPlan> {
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "plan-detail"), 60);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("PLAN_READ");
+      const plan = await this.planRepository().getById(planId, true);
+      if (plan === undefined) throw new ApiError(404, apiErrorCodes.notFound, "No se encontró el plan solicitado.");
+      return plan;
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible consultar el plan.");
+    }
+  }
+
+  async createAdminMembershipPlan(
+    request: Request,
+    correlationId: string,
+    input: MembershipPlanCommand,
+  ): Promise<MembershipPlan> {
+    this.assertSameOrigin(request);
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "plan-write"), 20);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("PLAN_MANAGE");
+      const now = this.clock().toISOString();
+      return await this.planRepository().create({
+        ...input,
+        actorId: principal.id,
+        auditId: this.ids(),
+        correlationId,
+        createdAt: now,
+        planId: this.ids(),
+      });
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof DynamoDbRepositoryError && error.code === "PLAN_CONFLICT") {
+        throw new ApiError(409, apiErrorCodes.conflict, "El plan ya existe o cambió durante la operación.");
+      }
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible crear el plan.");
+    }
+  }
+
+  async updateAdminMembershipPlan(
+    request: Request,
+    correlationId: string,
+    planId: string,
+    input: UpdateMembershipPlanCommand,
+  ): Promise<MembershipPlan> {
+    this.assertSameOrigin(request);
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "plan-write"), 20);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("PLAN_MANAGE");
+      return await this.planRepository().update({
+        ...input,
+        actorId: principal.id,
+        auditId: this.ids(),
+        correlationId,
+        planId,
+        updatedAt: this.clock().toISOString(),
+      });
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof DynamoDbRepositoryError) {
+        if (error.code === "RESOURCE_NOT_FOUND") {
+          throw new ApiError(404, apiErrorCodes.notFound, "No se encontró el plan solicitado.");
+        }
+        if (error.code === "PLAN_CONFLICT") {
+          throw new ApiError(409, apiErrorCodes.conflict, "El plan cambió. Actualiza la página antes de reintentar.");
+        }
+      }
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible actualizar el plan.");
+    }
+  }
+
   logout(request: Request): Response {
     this.assertSameOrigin(request);
     this.assertRateLimit(requestRateKey(request, "logout"), 20);
@@ -542,6 +701,13 @@ export class AuthService {
         "Demasiados intentos. Intenta nuevamente en un minuto.",
       );
     }
+  }
+
+  private planRepository(): MembershipPlanPort {
+    if (this.dependencies.plans === undefined) {
+      throw new ApiError(500, apiErrorCodes.internalError, "El servicio de planes no está configurado.");
+    }
+    return this.dependencies.plans;
   }
 
   private rethrowAuthorization(error: unknown): void {
