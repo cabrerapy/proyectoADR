@@ -125,14 +125,21 @@ const STATUS_PERMISSIONS = {
   ],
 } as const satisfies Readonly<Record<UserStatus, readonly AuthorizationAction[]>>;
 
-const OWNED_ACTIONS: ReadonlySet<AuthorizationAction> = new Set([
+export const OWNED_AUTHORIZATION_ACTIONS = [
   "PROFILE_READ_OWN",
   "PROFILE_UPDATE_OWN",
   "PROFILE_COMPLETE_ONBOARDING",
   "MEMBERSHIP_READ_OWN",
   "PAYMENT_READ_OWN",
   "RESERVATION_MANAGE_OWN",
-]);
+] as const satisfies readonly AuthorizationAction[];
+
+export type OwnedAuthorizationAction =
+  (typeof OWNED_AUTHORIZATION_ACTIONS)[number];
+
+const OWNED_ACTIONS: ReadonlySet<AuthorizationAction> = new Set(
+  OWNED_AUTHORIZATION_ACTIONS,
+);
 
 export interface AuthorizationPrincipal {
   readonly roles: readonly UserRole[];

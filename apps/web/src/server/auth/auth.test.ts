@@ -14,6 +14,7 @@ import { AuthService, type PendingUserPort } from "./auth-service";
 import { CognitoTokenClient, type CognitoTokenPort } from "./cognito-client";
 import { oauthCookieNames, sessionCookieName } from "./cookies";
 import { FixedWindowRateLimiter } from "./rate-limiter";
+import type { RateLimiter } from "./rate-limiter";
 
 const config: AuthConfig = {
   appBaseUrl: "https://app.example.com",
@@ -65,7 +66,9 @@ describe("OAuth session service", () => {
     emailVerified: true,
   } as const;
 
-  const setup = () => {
+  const setup = (
+    rateLimiter: RateLimiter = new FixedWindowRateLimiter(() => 1),
+  ) => {
     const users = new Map<string, Parameters<PendingUserPort["createPending"]>[0]>();
     const completed = new Map<string, UserProfile>();
     const toProfile = (
@@ -121,7 +124,7 @@ describe("OAuth session service", () => {
       clock: () => new Date("2026-08-08T12:00:00Z"),
       config,
       ids: () => `user-${++sequence}`,
-      rateLimiter: new FixedWindowRateLimiter(() => 1),
+      rateLimiter,
       tokens,
       users: userPort,
     });
@@ -209,6 +212,39 @@ describe("OAuth session service", () => {
     expect(userPort.completePendingProfile).toHaveBeenCalledWith(expect.objectContaining({
       userId: "owned-user",
     }));
+  });
+
+  it("rate limits onboarding by the authenticated principal without exposing its ID", async () => {
+    const keys: string[] = [];
+    const rateLimiter: RateLimiter = {
+      consume: (key) => {
+        keys.push(key);
+        return !key.startsWith("onboarding-write:");
+      },
+    };
+    const { service, userPort } = setup(rateLimiter);
+    await userPort.createPending({
+      ...identity,
+      createdAt: "2026-08-08T12:00:00.000Z",
+      userId: "owned-user",
+    });
+    const request = new Request("https://app.example.com/api/v1/onboarding", {
+      headers: {
+        cookie: `${sessionCookieName(config.environment)}=signed-id-token`,
+        origin: config.appBaseUrl,
+      },
+      method: "PATCH",
+    });
+
+    await expect(service.completeProfile(request, {
+      displayName: "María Núñez",
+      expectedVersion: 1,
+      phone: "+595981123456",
+    })).rejects.toMatchObject({ code: "RATE_LIMITED", status: 429 });
+    expect(userPort.completePendingProfile).not.toHaveBeenCalled();
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).toMatch(/^onboarding-write:[a-f0-9]{64}$/u);
+    expect(keys[0]).not.toContain("owned-user");
   });
 
   it.each(["ACTIVE", "SUSPENDED", "REJECTED", "INACTIVE"] as const)(

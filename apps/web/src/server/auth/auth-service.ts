@@ -5,7 +5,7 @@ import {
   type CompletePendingProfileInput,
   type CreatePendingUserResult,
 } from "@gym-adr/data-access";
-import type { UserProfile } from "@gym-adr/domain";
+import { AuthorizationDeniedError, type UserProfile } from "@gym-adr/domain";
 import type { CompleteProfileInput } from "@gym-adr/validation";
 
 import { ApiError, apiErrorCodes } from "../http/api-error";
@@ -13,7 +13,15 @@ import type { AuthConfig } from "./auth-config";
 import { oauthCookieNames, readCookies, serializeCookie, sessionCookieName } from "./cookies";
 import type { CognitoTokenPort } from "./cognito-client";
 import { createOAuthTransaction, secureEqual } from "./oauth-transaction";
-import { requestRateKey, type RateLimiter } from "./rate-limiter";
+import {
+  principalRateKey,
+  requestRateKey,
+  type RateLimiter,
+} from "./rate-limiter";
+import {
+  AuthorizedRepositoryScope,
+  principalFromProfile,
+} from "./repository-scope";
 
 export interface PendingUserPort {
   createPending(input: {
@@ -71,9 +79,7 @@ export class AuthService {
   }
 
   beginLogin(request: Request): Response {
-    if (!this.dependencies.rateLimiter.consume(requestRateKey(request, "login"), 10, 60_000)) {
-      throw new ApiError(429, apiErrorCodes.rateLimited, "Demasiados intentos. Intenta nuevamente en un minuto.");
-    }
+    this.assertRateLimit(requestRateKey(request, "login"), 10);
     const provider = new URL(request.url).searchParams.get("provider");
     if (provider !== null && provider !== "Google" && provider !== "Facebook") {
       throw invalidAuthentication("Proveedor de acceso no válido.");
@@ -100,9 +106,7 @@ export class AuthService {
   }
 
   async completeCallback(request: Request): Promise<Response> {
-    if (!this.dependencies.rateLimiter.consume(requestRateKey(request, "callback"), 20, 60_000)) {
-      throw new ApiError(429, apiErrorCodes.rateLimited, "Demasiados intentos. Intenta nuevamente en un minuto.");
-    }
+    this.assertRateLimit(requestRateKey(request, "callback"), 20);
     const url = new URL(request.url);
     if (url.searchParams.has("error")) {
       throw new ApiError(401, apiErrorCodes.authenticationFailed, "No fue posible iniciar sesión.");
@@ -154,7 +158,16 @@ export class AuthService {
   }
 
   async getOnboardingProfile(request: Request): Promise<OnboardingProfile> {
-    return toOnboardingProfile(await this.authenticate(request));
+    const profile = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(profile.id, "onboarding-read"), 60);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(profile))
+        .ownUserId("PROFILE_READ_OWN");
+      return toOnboardingProfile(profile);
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      throw error;
+    }
   }
 
   async completeProfile(
@@ -163,20 +176,19 @@ export class AuthService {
   ): Promise<OnboardingProfile> {
     this.assertSameOrigin(request);
     const profile = await this.authenticate(request);
-    if (profile.status !== "PENDING") {
-      throw new ApiError(
-        403,
-        apiErrorCodes.forbidden,
-        "El estado de tu cuenta no permite completar esta solicitud.",
-      );
-    }
+    this.assertRateLimit(principalRateKey(profile.id, "onboarding-write"), 10);
     try {
-      return toOnboardingProfile(await this.dependencies.users.completePendingProfile({
-        ...input,
-        onboardingCompletedAt: this.clock().toISOString(),
-        userId: profile.id,
-      }));
+      const scope = new AuthorizedRepositoryScope(principalFromProfile(profile));
+      return toOnboardingProfile(await scope.mutateOwn(
+        "PROFILE_COMPLETE_ONBOARDING",
+        (userId) => this.dependencies.users.completePendingProfile({
+          ...input,
+          onboardingCompletedAt: this.clock().toISOString(),
+          userId,
+        }),
+      ));
     } catch (error) {
+      this.rethrowAuthorization(error);
       if (error instanceof DynamoDbRepositoryError) {
         if (error.code === "USER_STATUS_INVALID") {
           throw new ApiError(403, apiErrorCodes.forbidden, "El estado de tu cuenta cambió.");
@@ -198,6 +210,7 @@ export class AuthService {
 
   logout(request: Request): Response {
     this.assertSameOrigin(request);
+    this.assertRateLimit(requestRateKey(request, "logout"), 20);
     const destination = new URL("/logout", this.dependencies.config.hostedUiBaseUrl);
     destination.search = new URLSearchParams({
       client_id: this.dependencies.config.clientId,
@@ -238,6 +251,26 @@ export class AuthService {
   private assertSameOrigin(request: Request): void {
     if (request.headers.get("origin") !== this.dependencies.config.appBaseUrl) {
       throw new ApiError(403, apiErrorCodes.forbidden, "El origen de la solicitud no es válido.");
+    }
+  }
+
+  private assertRateLimit(key: string, limit: number): void {
+    if (!this.dependencies.rateLimiter.consume(key, limit, 60_000)) {
+      throw new ApiError(
+        429,
+        apiErrorCodes.rateLimited,
+        "Demasiados intentos. Intenta nuevamente en un minuto.",
+      );
+    }
+  }
+
+  private rethrowAuthorization(error: unknown): void {
+    if (error instanceof AuthorizationDeniedError) {
+      throw new ApiError(
+        403,
+        apiErrorCodes.forbidden,
+        "El estado o los permisos de tu cuenta no permiten esta operación.",
+      );
     }
   }
 }

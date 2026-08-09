@@ -19,6 +19,7 @@
     "@aws-sdk/client-secrets-manager": "3.984.0",
     "@aws-sdk/client-ssm": "3.984.0",
     "@gym-adr/data-access": "0.1.0",
+    "@gym-adr/domain": "0.1.0",
     "@gym-adr/validation": "0.1.0",
     "jose": "6.2.8",
     "next": "16.3.0",
