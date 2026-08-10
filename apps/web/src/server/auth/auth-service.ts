@@ -15,6 +15,9 @@ import {
   type PaymentMutationResult,
   type RecordPaymentInput,
   type CreateSchedulingCatalogInput,
+  type CreateClassSessionInput,
+  type ClassSessionPage,
+  type UpdateClassSessionInput,
   type SchedulingCatalogCursors,
   type SchedulingCatalogPage,
   type UpdateSchedulingCatalogInput,
@@ -38,12 +41,15 @@ import {
   type PaymentCorrection,
   type PaymentStatus,
   type ClassType,
+  type ClassSession,
   type Trainer,
   type UserProfile,
   type UserStatus,
 } from "@gym-adr/domain";
 import type {
   AdminStudentQuery,
+  ClassSessionCommand,
+  ClassSessionQuery,
   AdminPaymentQuery,
   CorrectPaymentCommand,
   CreateMembershipCommand,
@@ -61,6 +67,7 @@ import type {
   SchedulingCatalogQuery,
   TransitionStudentStatusInput,
   UpdateMembershipPlanCommand,
+  UpdateClassSessionCommand,
   UpdateSchedulingCatalogCommand,
   UpdateMembershipCommand,
   UpdateOwnProfileInput,
@@ -136,10 +143,19 @@ export interface PaymentPort {
 export interface SchedulingCatalogPort {
   createClassType(input: CreateSchedulingCatalogInput): Promise<ClassType>;
   createTrainer(input: CreateSchedulingCatalogInput): Promise<Trainer>;
+  getClassType(id: string): Promise<ClassType | undefined>;
+  getTrainer(id: string): Promise<Trainer | undefined>;
   listClassTypes(status?: "ACTIVE" | "INACTIVE" | "ALL", cursors?: SchedulingCatalogCursors): Promise<SchedulingCatalogPage<ClassType>>;
   listTrainers(status?: "ACTIVE" | "INACTIVE" | "ALL", cursors?: SchedulingCatalogCursors): Promise<SchedulingCatalogPage<Trainer>>;
   updateClassType(input: UpdateSchedulingCatalogInput): Promise<ClassType>;
   updateTrainer(input: UpdateSchedulingCatalogInput): Promise<Trainer>;
+}
+
+export interface ClassSessionPort {
+  create(input: CreateClassSessionInput): Promise<ClassSession>;
+  getById(id: string, consistentRead?: boolean): Promise<ClassSession | undefined>;
+  listByDate(date: string): Promise<ClassSessionPage>;
+  update(input: UpdateClassSessionInput): Promise<ClassSession>;
 }
 
 export interface OnboardingProfile {
@@ -231,6 +247,7 @@ export interface AuthServiceDependencies {
   readonly clock?: () => Date;
   readonly config: AuthConfig;
   readonly catalog?: SchedulingCatalogPort;
+  readonly classSessions?: ClassSessionPort;
   readonly ids?: () => string;
   readonly memberships?: MembershipPort;
   readonly payments?: PaymentPort;
@@ -441,6 +458,13 @@ const paymentView = (payment: Payment): PaymentView => {
   const { receiptKey, ...safe } = payment;
   return { ...safe, hasReceipt: receiptKey !== undefined };
 };
+const asuncionTime = (value: Date): string => new Intl.DateTimeFormat("en-GB", {
+  hour: "2-digit",
+  hour12: false,
+  minute: "2-digit",
+  second: "2-digit",
+  timeZone: "America/Asuncion",
+}).format(value);
 const decodeOwnPaymentCursor = (cursor: string | undefined, owner: string): DynamoDbKey | undefined => {
   if (cursor === undefined) return undefined;
   try {
@@ -953,6 +977,81 @@ export class AuthService {
     }
   }
 
+  async listAdminClassSessions(request: Request, query: ClassSessionQuery): Promise<{ readonly sessions: readonly ClassSession[] }> {
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "class-session-read"), 60);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("CLASS_SESSION_MANAGE");
+      const page = await this.classSessionRepository().listByDate(query.date);
+      return { sessions: page.sessions };
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible consultar las sesiones.");
+    }
+  }
+
+  async createAdminClassSession(request: Request, correlationId: string, input: ClassSessionCommand): Promise<ClassSession> {
+    this.assertSameOrigin(request);
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "class-session-write"), 30);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("CLASS_SESSION_MANAGE");
+      const [trainer, classType] = await Promise.all([this.catalogRepository().getTrainer(input.trainerId), this.catalogRepository().getClassType(input.classTypeId)]);
+      if (trainer?.status !== "ACTIVE" || classType?.status !== "ACTIVE") throw new ApiError(422, apiErrorCodes.validationError, "El entrenador y el tipo de clase deben estar activos.");
+      const now = this.clock().toISOString();
+      const startsAt = new Date(input.startsAt);
+      return await this.classSessionRepository().create({
+        ...input,
+        auditId: this.ids(),
+        classDate: localCalendarDate(startsAt),
+        classId: this.ids(),
+        classTypeName: classType.name,
+        correlationId,
+        createdAt: now,
+        createdBy: principal.id,
+        startTime: asuncionTime(startsAt),
+        trainerName: trainer.name,
+      });
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      if (error instanceof DynamoDbRepositoryError && error.code === "CLASS_SESSION_CONFLICT") throw new ApiError(409, apiErrorCodes.conflict, "La sesión ya existe o una referencia cambió.");
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible crear la sesión.");
+    }
+  }
+
+  async updateAdminClassSession(request: Request, correlationId: string, classId: string, input: UpdateClassSessionCommand): Promise<ClassSession> {
+    this.assertSameOrigin(request);
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "class-session-write"), 30);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("CLASS_SESSION_MANAGE");
+      const [trainer, classType] = await Promise.all([this.catalogRepository().getTrainer(input.trainerId), this.catalogRepository().getClassType(input.classTypeId)]);
+      if (trainer?.status !== "ACTIVE" || classType?.status !== "ACTIVE") throw new ApiError(422, apiErrorCodes.validationError, "El entrenador y el tipo de clase deben estar activos.");
+      const startsAt = new Date(input.startsAt);
+      return await this.classSessionRepository().update({
+        ...input,
+        actorId: principal.id,
+        auditId: this.ids(),
+        classDate: localCalendarDate(startsAt),
+        classId,
+        classTypeName: classType.name,
+        correlationId,
+        startTime: asuncionTime(startsAt),
+        trainerName: trainer.name,
+        updatedAt: this.clock().toISOString(),
+      });
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      if (error instanceof DynamoDbRepositoryError) {
+        if (error.code === "RESOURCE_NOT_FOUND") throw new ApiError(404, apiErrorCodes.notFound, "No se encontró la sesión.");
+        if (error.code === "CLASS_SESSION_CONFLICT") throw new ApiError(409, apiErrorCodes.conflict, "La sesión cambió o la capacidad no admite la edición.");
+      }
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible actualizar la sesión.");
+    }
+  }
+
   async listAdminMemberships(
     request: Request,
     query: MembershipHistoryQuery,
@@ -1434,6 +1533,11 @@ export class AuthService {
   private catalogRepository(): SchedulingCatalogPort {
     if (this.dependencies.catalog === undefined) throw new ApiError(500, apiErrorCodes.internalError, "El catálogo de clases no está configurado.");
     return this.dependencies.catalog;
+  }
+
+  private classSessionRepository(): ClassSessionPort {
+    if (this.dependencies.classSessions === undefined) throw new ApiError(500, apiErrorCodes.internalError, "El servicio de sesiones no está configurado.");
+    return this.dependencies.classSessions;
   }
 
   private membershipRepository(): MembershipPort {

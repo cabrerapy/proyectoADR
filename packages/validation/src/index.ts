@@ -19,3 +19,4 @@ export * from "./membership";
 export * from "./payment";
 export * from "./profile";
 export * from "./scheduling-catalog";
+export * from "./class-session";

@@ -5,7 +5,7 @@ import {
   SignJWT,
 } from "jose";
 import type { CreatePendingUserResult } from "@gym-adr/data-access";
-import type { ClassType, Membership, MembershipPlan, Payment, Trainer, UserProfile } from "@gym-adr/domain";
+import type { ClassSession, ClassType, Membership, MembershipPlan, Payment, Trainer, UserProfile } from "@gym-adr/domain";
 import {
   validateAdminStudentQuery,
   validateCompleteProfile,
@@ -20,7 +20,7 @@ import {
 import { describe, expect, it, vi } from "vitest";
 
 import { resolveAuthConfig, type AuthConfig } from "./auth-config";
-import { AuthService, type MembershipPlanPort, type MembershipPort, type PaymentPort, type PendingUserPort, type SchedulingCatalogPort } from "./auth-service";
+import { AuthService, type ClassSessionPort, type MembershipPlanPort, type MembershipPort, type PaymentPort, type PendingUserPort, type SchedulingCatalogPort } from "./auth-service";
 import { CognitoTokenClient, type CognitoTokenPort } from "./cognito-client";
 import { oauthCookieNames, sessionCookieName } from "./cookies";
 import { FixedWindowRateLimiter } from "./rate-limiter";
@@ -300,15 +300,25 @@ describe("OAuth session service", () => {
     const catalogPort: SchedulingCatalogPort = {
       createClassType: vi.fn(async (input) => ({ createdAt: input.createdAt, createdBy: input.actorId, ...(input.description === undefined ? {} : { description: input.description }), id: input.id, name: input.name, status: "ACTIVE", updatedAt: input.createdAt, updatedBy: input.actorId, version: 1 } satisfies ClassType)),
       createTrainer: vi.fn(async (input) => ({ createdAt: input.createdAt, createdBy: input.actorId, ...(input.description === undefined ? {} : { bio: input.description }), id: input.id, name: input.name, status: "ACTIVE", updatedAt: input.createdAt, updatedBy: input.actorId, version: 1 } satisfies Trainer)),
+      getClassType: vi.fn(async (id) => ({ createdAt: "2026-08-08T10:00:00Z", createdBy: "admin", id, name: "Cross training", status: "ACTIVE", updatedAt: "2026-08-08T10:00:00Z", updatedBy: "admin", version: 1 } satisfies ClassType)),
+      getTrainer: vi.fn(async (id) => ({ createdAt: "2026-08-08T10:00:00Z", createdBy: "admin", id, name: "Entrenador", status: "ACTIVE", updatedAt: "2026-08-08T10:00:00Z", updatedBy: "admin", version: 1 } satisfies Trainer)),
       listClassTypes: vi.fn(async () => ({ items: [] })),
       listTrainers: vi.fn(async () => ({ items: [] })),
       updateClassType: vi.fn(async (input) => ({ createdAt: "2026-08-08T10:00:00Z", createdBy: "admin", ...(input.description === undefined ? {} : { description: input.description }), id: input.id, name: input.name, status: input.status, updatedAt: input.updatedAt, updatedBy: input.actorId, version: input.expectedVersion + 1 } satisfies ClassType)),
       updateTrainer: vi.fn(async (input) => ({ createdAt: "2026-08-08T10:00:00Z", createdBy: "admin", ...(input.description === undefined ? {} : { bio: input.description }), id: input.id, name: input.name, status: input.status, updatedAt: input.updatedAt, updatedBy: input.actorId, version: input.expectedVersion + 1 } satisfies Trainer)),
     };
+    const classSessionRecords: ClassSession[] = [];
+    const classSessionPort: ClassSessionPort = {
+      create: vi.fn(async (input) => { const value: ClassSession = { capacity: input.capacity, classDate: input.classDate, classTypeId: input.classTypeId, classTypeName: input.classTypeName, confirmedCount: 0, createdAt: input.createdAt, createdBy: input.createdBy, endsAt: input.endsAt, id: input.classId, startTime: input.startTime, startsAt: input.startsAt, status: "SCHEDULED", trainerId: input.trainerId, trainerName: input.trainerName, updatedAt: input.createdAt, version: 1 }; classSessionRecords.push(value); return value; }),
+      getById: vi.fn(async (id) => classSessionRecords.find((entry) => entry.id === id)),
+      listByDate: vi.fn(async (date) => ({ sessions: classSessionRecords.filter((entry) => entry.classDate === date) })),
+      update: vi.fn(async (input) => { const current = classSessionRecords.find((entry) => entry.id === input.classId); if (current === undefined) throw new Error("missing class"); const value: ClassSession = { ...current, capacity: input.capacity, classDate: input.classDate, classTypeId: input.classTypeId, classTypeName: input.classTypeName, endsAt: input.endsAt, startTime: input.startTime, startsAt: input.startsAt, trainerId: input.trainerId, trainerName: input.trainerName, updatedAt: input.updatedAt, version: input.expectedVersion + 1 }; classSessionRecords.splice(classSessionRecords.indexOf(current), 1, value); return value; }),
+    };
     let sequence = 0;
     const service = new AuthService({
       clock: () => new Date("2026-08-08T12:00:00Z"),
       catalog: catalogPort,
+      classSessions: classSessionPort,
       config,
       ids: () => `user-${++sequence}`,
       memberships: membershipPort,
@@ -319,7 +329,7 @@ describe("OAuth session service", () => {
       tokens,
       users: userPort,
     });
-    return { catalogPort, completed, membershipPort, memberships, paymentPort, paymentRecords, planPort, plans, receiptPort, service, tokens, userPort, users };
+    return { catalogPort, classSessionPort, classSessionRecords, completed, membershipPort, memberships, paymentPort, paymentRecords, planPort, plans, receiptPort, service, tokens, userPort, users };
   };
 
   it("starts authorization with state, nonce, S256 PKCE and hardened cookies", () => {
@@ -1071,6 +1081,20 @@ describe("OAuth session service", () => {
     adminSetup.completed.set(adminIdentity.userId, { createdAt: adminIdentity.createdAt, displayName: "Admin", email: adminIdentity.email, emailVerified: true, id: adminIdentity.userId, roles: ["ADMIN"], status: "ACTIVE", updatedAt: adminIdentity.createdAt, version: 2 });
     const created = await adminSetup.service.createAdminSchedulingCatalog(writeRequest(), "correlation-2", "trainers", { name: "Entrenador" });
     await expect(adminSetup.service.updateAdminSchedulingCatalog(new Request("https://app.example.com/api/v1/admin/trainers/id", { headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token`, origin: config.appBaseUrl }, method: "PATCH" }), "correlation-3", "trainers", created.id, { expectedVersion: 1, name: created.name, status: "INACTIVE" })).resolves.toMatchObject({ status: "INACTIVE", version: 2 });
+  });
+
+  it("allows active STAFF to create and edit concrete sessions with server-owned names and dates", async () => {
+    const { classSessionPort, completed, service, userPort } = setup();
+    const actor = { ...identity, createdAt: "2026-08-08T12:00:00Z", userId: "staff-session" };
+    await userPort.createPending(actor);
+    completed.set(actor.userId, { createdAt: actor.createdAt, displayName: "Staff", email: actor.email, emailVerified: true, id: actor.userId, roles: ["STAFF"], status: "ACTIVE", updatedAt: actor.createdAt, version: 2 });
+    const request = () => new Request("https://app.example.com/api/v1/admin/class-sessions", { headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token`, origin: config.appBaseUrl }, method: "POST" });
+    const command = { capacity: 12, classTypeId: "type-1", endsAt: "2026-08-10T23:00:00.000Z", startsAt: "2026-08-10T22:00:00.000Z", trainerId: "trainer-1" };
+    const created = await service.createAdminClassSession(request(), "correlation-create", command);
+    expect(classSessionPort.create).toHaveBeenCalledWith(expect.objectContaining({ classDate: "2026-08-10", classTypeName: "Cross training", createdBy: actor.userId, startTime: "19:00:00", trainerName: "Entrenador" }));
+    await expect(service.updateAdminClassSession(new Request(`https://app.example.com/api/v1/admin/class-sessions/${created.id}`, { headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token`, origin: config.appBaseUrl }, method: "PATCH" }), "correlation-update", created.id, { ...command, capacity: 16, expectedVersion: 1 })).resolves.toMatchObject({ capacity: 16, version: 2 });
+    completed.set(actor.userId, { ...completed.get(actor.userId)!, roles: ["STUDENT"] });
+    await expect(service.listAdminClassSessions(new Request("https://app.example.com/api/v1/admin/class-sessions?date=2026-08-10", { headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token` } }), { date: "2026-08-10" })).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
   });
 
   it("allows only active ADMIN to create linked, idempotent payment corrections", async () => {

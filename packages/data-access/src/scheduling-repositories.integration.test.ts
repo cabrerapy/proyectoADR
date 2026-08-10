@@ -30,6 +30,7 @@ const catalog = new SchedulingCatalogRepository(adapter, tableName);
 const audits = new AuditLogRepository(adapter, tableName);
 
 const firstClass = {
+  auditId: "audit-class-001",
   capacity: 16,
   classDate: "2026-08-10",
   classId: "class-001",
@@ -37,6 +38,7 @@ const firstClass = {
   classTypeName: "Cross training",
   createdAt: "2026-08-08T12:00:00Z",
   createdBy: "staff-001",
+  correlationId: "correlation-class-001",
   endsAt: "2026-08-10T23:00:00Z",
   startTime: "18:00:00",
   startsAt: "2026-08-10T22:00:00Z",
@@ -83,6 +85,7 @@ describe.skipIf(!enabled)("scheduling repositories with DynamoDB Local", () => {
       }),
     );
     await catalog.createTrainer({ actorId: "admin-001", auditId: "audit-trainer-001", correlationId: "correlation-trainer-001", createdAt: "2026-08-08T10:00:00Z", id: "trainer-001", name: "Entrenador Uno" });
+    await catalog.createTrainer({ actorId: "admin-001", auditId: "audit-trainer-003", correlationId: "correlation-trainer-003", createdAt: "2026-08-08T10:00:00Z", id: "trainer-003", name: "Entrenadora Tres" });
     await catalog.createClassType({ actorId: "admin-001", auditId: "audit-type-001", correlationId: "correlation-type-001", createdAt: "2026-08-08T10:00:00Z", id: "type-001", name: "Cross training" });
   });
 
@@ -112,6 +115,7 @@ describe.skipIf(!enabled)("scheduling repositories with DynamoDB Local", () => {
     await sessions.create(firstClass);
     await sessions.create({
       ...firstClass,
+      auditId: "audit-class-002",
       classId: "class-002",
       endsAt: "2026-08-11T00:00:00Z",
       startTime: "19:00:00",
@@ -119,6 +123,7 @@ describe.skipIf(!enabled)("scheduling repositories with DynamoDB Local", () => {
     });
     await sessions.create({
       ...firstClass,
+      auditId: "audit-class-003",
       classDate: "2026-08-11",
       classId: "class-003",
       endsAt: "2026-08-11T23:00:00Z",
@@ -133,6 +138,12 @@ describe.skipIf(!enabled)("scheduling repositories with DynamoDB Local", () => {
       .resolves.toMatchObject({ sessions: [{ id: "class-001" }, { id: "class-002" }, { id: "class-003" }] });
     await expect(sessions.listAvailable("2026-08-10", "2026-08-11"))
       .resolves.toMatchObject({ sessions: [{ id: "class-001" }, { id: "class-002" }, { id: "class-003" }] });
+    await expect(sessions.update({ actorId: "staff-001", auditId: "audit-class-update-001", capacity: 20, classDate: "2026-08-12", classId: "class-001", classTypeId: "type-001", classTypeName: "Cross training", correlationId: "correlation-class-update-001", endsAt: "2026-08-12T23:00:00Z", expectedVersion: 1, startTime: "18:00:00", startsAt: "2026-08-12T22:00:00Z", trainerId: "trainer-003", trainerName: "Entrenadora Tres", updatedAt: "2026-08-08T12:30:00Z" })).resolves.toMatchObject({ capacity: 20, trainerId: "trainer-003", version: 2 });
+    await expect(sessions.listByDate("2026-08-10")).resolves.toMatchObject({ sessions: [{ id: "class-002" }] });
+    await expect(sessions.listByDate("2026-08-12")).resolves.toMatchObject({ sessions: [{ id: "class-001" }] });
+    await expect(sessions.listByTrainer("trainer-003")).resolves.toMatchObject({ sessions: [{ id: "class-001" }] });
+    const sessionAudits = await audits.listByEntity("ClassSession", "class-001", "2026-08-08T00:00:00Z", "2026-08-09T00:00:00Z");
+    expect(sessionAudits.entries.map(({ action }) => action)).toEqual(["CLASS_SESSION_CREATED", "CLASS_SESSION_UPDATED"]);
   });
 
   it("allows only one conditional reservation for a class/student pair", async () => {
@@ -162,6 +173,7 @@ describe.skipIf(!enabled)("scheduling repositories with DynamoDB Local", () => {
   it("allows at most one reservation when simultaneous attempts compete for one place", async () => {
     const session = await sessions.create({
       ...firstClass,
+      auditId: "audit-class-capacity-001",
       capacity: 1,
       classDate: "2026-08-12",
       classId: "class-capacity-001",

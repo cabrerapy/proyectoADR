@@ -6,6 +6,7 @@ import {
 import type { TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 
 import { BaseDynamoDbRepository } from "./base-repository";
+import { AuditLogRepository } from "./audit-log-repository";
 import type {
   DynamoDbDocumentPort,
   DynamoDbItem,
@@ -39,6 +40,7 @@ export type SchedulingFanOutCursors = Readonly<
 >;
 
 export interface CreateClassSessionInput {
+  readonly auditId: string;
   readonly capacity: number;
   readonly classDate: string;
   readonly classId: string;
@@ -46,11 +48,30 @@ export interface CreateClassSessionInput {
   readonly classTypeName: string;
   readonly createdAt: string;
   readonly createdBy: string;
+  readonly correlationId: string;
   readonly endsAt: string;
   readonly startTime: string;
   readonly startsAt: string;
   readonly trainerId: string;
   readonly trainerName: string;
+}
+
+export interface UpdateClassSessionInput {
+  readonly actorId: string;
+  readonly auditId: string;
+  readonly capacity: number;
+  readonly classDate: string;
+  readonly classId: string;
+  readonly classTypeId: string;
+  readonly classTypeName: string;
+  readonly correlationId: string;
+  readonly endsAt: string;
+  readonly expectedVersion: number;
+  readonly startTime: string;
+  readonly startsAt: string;
+  readonly trainerId: string;
+  readonly trainerName: string;
+  readonly updatedAt: string;
 }
 
 export interface ClassSessionPage {
@@ -154,6 +175,7 @@ export class ClassSessionRepository {
           TableName: this.table,
         },
       },
+      this.auditAction(session, input.auditId, input.correlationId, "CLASS_SESSION_CREATED", session.createdBy),
     ];
     try {
       await this.document.transactWrite({ TransactItems: actions });
@@ -171,6 +193,42 @@ export class ClassSessionRepository {
       throw mapped;
     }
     return session;
+  }
+
+  async update(input: UpdateClassSessionInput): Promise<ClassSession> {
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) throw invalidDynamoDbInput("La versión esperada no es válida.");
+    const current = await this.getById(input.classId, true);
+    if (current === undefined) throw new DynamoDbRepositoryError("RESOURCE_NOT_FOUND", "La sesión solicitada no existe.");
+    if (current.status !== "SCHEDULED" || current.version !== input.expectedVersion) throw classError("CLASS_SESSION_CONFLICT", "La sesión cambió o ya no puede editarse.");
+    const next = this.validatePersisted({
+      ...input,
+      confirmedCount: current.confirmedCount,
+      createdAt: current.createdAt,
+      createdBy: current.createdBy,
+      status: current.status,
+      version: current.version + 1,
+    });
+    const key = primaryKeys.classSession(current.id);
+    const actions: TransactionAction[] = [
+      this.activeReferenceCheck(primaryKeys.trainer(next.trainerId), "Trainer"),
+      this.activeReferenceCheck(primaryKeys.classType(next.classTypeId), "ClassType"),
+      {
+        Put: {
+          ConditionExpression: "attribute_exists(#pk) AND #status = :scheduled AND #version = :expectedVersion AND #confirmedCount <= :capacity",
+          ExpressionAttributeNames: { "#confirmedCount": "confirmedCount", "#pk": "PK", "#status": "status", "#version": "version" },
+          ExpressionAttributeValues: { ":capacity": next.capacity, ":expectedVersion": input.expectedVersion, ":scheduled": "SCHEDULED" },
+          Item: this.toItem(next, key),
+          TableName: this.table,
+        },
+      },
+      this.auditAction(next, input.auditId, input.correlationId, "CLASS_SESSION_UPDATED", input.actorId),
+    ];
+    try { await this.document.transactWrite({ TransactItems: actions }); } catch (error) {
+      const mapped = mapDynamoDbError(error);
+      if (mapped.code === "TRANSACTION_CANCELLED" || mapped.code === "CONDITIONAL_CHECK_FAILED") throw classError("CLASS_SESSION_CONFLICT", "La sesión no pudo editarse porque una referencia, capacidad o versión cambió.");
+      throw mapped;
+    }
+    return next;
   }
 
   async prepareReserveCapacityUpdate(
@@ -347,6 +405,20 @@ export class ClassSessionRepository {
         TableName: this.table,
       },
     };
+  }
+
+  private auditAction(session: ClassSession, auditId: string, correlationId: string, action: string, actorId: string): TransactionAction {
+    return new AuditLogRepository(this.document, this.table).createAppendAction({
+      action,
+      actorId,
+      auditId,
+      correlationId,
+      details: { capacity: session.capacity, classTypeId: session.classTypeId, startsAt: session.startsAt, trainerId: session.trainerId, version: session.version },
+      result: "SUCCEEDED",
+      targetId: session.id,
+      targetType: "ClassSession",
+      timestamp: session.updatedAt,
+    }).action;
   }
 
   private async listByDatePartitions(
