@@ -37,6 +37,11 @@ export interface ConfirmedReservationPut {
   readonly reservation: Reservation;
 }
 
+export interface AdminCancelledReservationUpdate {
+  readonly action: TransactionAction;
+  readonly reservation: Reservation;
+}
+
 interface ReservationItem extends DynamoDbItem {
   readonly GSI2PK: string;
   readonly GSI2SK: string;
@@ -102,6 +107,51 @@ export class ReservationRepository {
         },
       },
       reservation,
+    };
+  }
+
+  buildAdminCancellation(
+    reservation: Reservation,
+    updatedAtInput: string,
+  ): AdminCancelledReservationUpdate {
+    if (reservation.status !== "CONFIRMED") {
+      throw invalidDynamoDbInput("Solo una reserva confirmada puede cancelarse administrativamente.");
+    }
+    const updatedAt = schedulingTimestamp(updatedAtInput, "updatedAt");
+    if (updatedAt < reservation.updatedAt) {
+      throw invalidDynamoDbInput("updatedAt no puede ser anterior a la reserva.");
+    }
+    const next: Reservation = {
+      ...reservation,
+      status: "ADMIN_CANCELLED",
+      updatedAt,
+      version: reservation.version + 1,
+    };
+    return {
+      action: {
+        Update: {
+          ConditionExpression:
+            "attribute_exists(#pk) AND #status = :confirmed AND #version = :expectedVersion",
+          ExpressionAttributeNames: {
+            "#pk": "PK",
+            "#status": "status",
+            "#updatedAt": "updatedAt",
+            "#version": "version",
+          },
+          ExpressionAttributeValues: {
+            ":cancelled": "ADMIN_CANCELLED",
+            ":confirmed": "CONFIRMED",
+            ":expectedVersion": reservation.version,
+            ":nextVersion": next.version,
+            ":updatedAt": updatedAt,
+          },
+          Key: primaryKeys.reservation(reservation.classId, reservation.studentId),
+          TableName: this.table,
+          UpdateExpression:
+            "SET #status = :cancelled, #updatedAt = :updatedAt, #version = :nextVersion",
+        },
+      },
+      reservation: next,
     };
   }
 

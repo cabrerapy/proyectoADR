@@ -309,9 +309,11 @@ describe("OAuth session service", () => {
     };
     const classSessionRecords: ClassSession[] = [];
     const classSessionPort: ClassSessionPort = {
+      cancel: vi.fn(async (input) => { const current = classSessionRecords.find((entry) => entry.id === input.classId); if (current === undefined) throw new Error("missing class"); const value: ClassSession = { ...current, status: "CANCELLED", updatedAt: input.updatedAt, version: input.expectedVersion + 1 }; classSessionRecords.splice(classSessionRecords.indexOf(current), 1, value); return value; }),
       create: vi.fn(async (input) => { const value: ClassSession = { capacity: input.capacity, classDate: input.classDate, classTypeId: input.classTypeId, classTypeName: input.classTypeName, confirmedCount: 0, createdAt: input.createdAt, createdBy: input.createdBy, endsAt: input.endsAt, id: input.classId, startTime: input.startTime, startsAt: input.startsAt, status: "SCHEDULED", trainerId: input.trainerId, trainerName: input.trainerName, updatedAt: input.createdAt, version: 1 }; classSessionRecords.push(value); return value; }),
       getById: vi.fn(async (id) => classSessionRecords.find((entry) => entry.id === id)),
       listByDate: vi.fn(async (date) => ({ sessions: classSessionRecords.filter((entry) => entry.classDate === date) })),
+      propagateCancellationBatch: vi.fn(async (input) => { const current = classSessionRecords.find((entry) => entry.id === input.classId); if (current === undefined) throw new Error("missing class"); return { cancelledCount: 0, complete: true, session: current }; }),
       update: vi.fn(async (input) => { const current = classSessionRecords.find((entry) => entry.id === input.classId); if (current === undefined) throw new Error("missing class"); const value: ClassSession = { ...current, capacity: input.capacity, classDate: input.classDate, classTypeId: input.classTypeId, classTypeName: input.classTypeName, endsAt: input.endsAt, startTime: input.startTime, startsAt: input.startsAt, trainerId: input.trainerId, trainerName: input.trainerName, updatedAt: input.updatedAt, version: input.expectedVersion + 1 }; classSessionRecords.splice(classSessionRecords.indexOf(current), 1, value); return value; }),
     };
     let sequence = 0;
@@ -1093,8 +1095,11 @@ describe("OAuth session service", () => {
     const created = await service.createAdminClassSession(request(), "correlation-create", command);
     expect(classSessionPort.create).toHaveBeenCalledWith(expect.objectContaining({ classDate: "2026-08-10", classTypeName: "Cross training", createdBy: actor.userId, startTime: "19:00:00", trainerName: "Entrenador" }));
     await expect(service.updateAdminClassSession(new Request(`https://app.example.com/api/v1/admin/class-sessions/${created.id}`, { headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token`, origin: config.appBaseUrl }, method: "PATCH" }), "correlation-update", created.id, { ...command, capacity: 16, expectedVersion: 1 })).resolves.toMatchObject({ capacity: 16, version: 2 });
+    await expect(service.cancelAdminClassSession(new Request(`https://app.example.com/api/v1/admin/class-sessions/${created.id}/cancellation`, { headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token`, "idempotency-key": "cancel-session-request-001", origin: config.appBaseUrl }, method: "POST" }), "correlation-cancel", created.id, { expectedVersion: 2, reason: "Entrenador no disponible" })).resolves.toMatchObject({ propagation: { complete: true }, session: { status: "CANCELLED", version: 3 } });
+    expect(classSessionPort.cancel).toHaveBeenCalledWith(expect.objectContaining({ actorId: actor.userId, reason: "Entrenador no disponible", requestKey: "cancel-session-request-001" }));
     completed.set(actor.userId, { ...completed.get(actor.userId)!, roles: ["STUDENT"] });
     await expect(service.listAdminClassSessions(new Request("https://app.example.com/api/v1/admin/class-sessions?date=2026-08-10", { headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token` } }), { date: "2026-08-10" })).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+    await expect(service.cancelAdminClassSession(new Request(`https://app.example.com/api/v1/admin/class-sessions/${created.id}/cancellation`, { headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token`, "idempotency-key": "cancel-session-request-002", origin: config.appBaseUrl }, method: "POST" }), "correlation-forbidden", created.id, { expectedVersion: 3, reason: "Intento sin permisos" })).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
   });
 
   it("allows only active ADMIN to create linked, idempotent payment corrections", async () => {

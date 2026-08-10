@@ -209,4 +209,117 @@ describe.skipIf(!enabled)("scheduling repositories with DynamoDB Local", () => {
     await expect(reservations.listByClass(session.id, { consistentRead: true }))
       .resolves.toMatchObject({ reservations: [expect.any(Object)] });
   });
+
+  it("blocks a cancelled session immediately and resumes idempotent reservation batches", async () => {
+    let session = await sessions.create({
+      ...firstClass,
+      auditId: "audit-class-cancel-create",
+      capacity: 21,
+      classDate: "2026-08-13",
+      classId: "class-cancel-001",
+      endsAt: "2026-08-13T23:00:00Z",
+      startsAt: "2026-08-13T22:00:00Z",
+    });
+    for (let index = 0; index < 21; index += 1) {
+      const studentId = `cancel-student-${String(index).padStart(2, "0")}`;
+      const capacity = await sessions.prepareReserveCapacityUpdate(
+        session.id,
+        "2026-08-08T15:00:00Z",
+      );
+      const reservation = reservations.buildConfirmedPut({
+        classId: session.id,
+        createdAt: "2026-08-08T15:00:00Z",
+        reservationId: `cancel-reservation-${String(index).padStart(2, "0")}`,
+        startsAt: session.startsAt,
+        studentId,
+      });
+      await adapter.transactWrite({
+        TransactItems: [capacity.action, reservation.action],
+      });
+      session = capacity.nextSession;
+    }
+
+    const cancelInput = {
+      actorId: "staff-001",
+      auditId: "audit-class-cancel",
+      classId: session.id,
+      correlationId: "correlation-class-cancel",
+      expectedVersion: session.version,
+      reason: "Entrenador no disponible",
+      requestKey: "cancel-session-request-001",
+      updatedAt: "2026-08-08T15:01:00Z",
+    } as const;
+    await expect(sessions.cancel(cancelInput)).resolves.toMatchObject({
+      confirmedCount: 21,
+      status: "CANCELLED",
+      version: 23,
+    });
+    await expect(sessions.listAvailable("2026-08-13", "2026-08-13"))
+      .resolves.toMatchObject({ sessions: [] });
+
+    const firstBatch = await sessions.propagateCancellationBatch({
+      actorId: "staff-001",
+      auditId: "audit-class-cancel-batch-001",
+      classId: session.id,
+      correlationId: "correlation-class-cancel-batch-001",
+      reason: cancelInput.reason,
+      requestKey: cancelInput.requestKey,
+      updatedAt: "2026-08-08T15:02:00Z",
+    });
+    expect(firstBatch).toMatchObject({
+      cancelledCount: 20,
+      complete: false,
+      session: { confirmedCount: 1, status: "CANCELLED", version: 24 },
+    });
+    expect(firstBatch.cursor).toBeDefined();
+    if (firstBatch.cursor === undefined) throw new Error("El primer lote debe ser reanudable.");
+
+    const finalBatchInput = {
+      actorId: "staff-001",
+      auditId: "audit-class-cancel-batch-002",
+      classId: session.id,
+      correlationId: "correlation-class-cancel-batch-002",
+      cursor: firstBatch.cursor,
+      reason: cancelInput.reason,
+      requestKey: cancelInput.requestKey,
+      updatedAt: "2026-08-08T15:03:00Z",
+    } as const;
+    await expect(sessions.propagateCancellationBatch(finalBatchInput))
+      .resolves.toMatchObject({
+        cancelledCount: 1,
+        complete: true,
+        session: { confirmedCount: 0, status: "CANCELLED", version: 25 },
+      });
+    await expect(sessions.propagateCancellationBatch(finalBatchInput))
+      .resolves.toMatchObject({ complete: true, session: { confirmedCount: 0, version: 25 } });
+    await expect(sessions.cancel({ ...cancelInput, updatedAt: "2026-08-08T15:04:00Z" }))
+      .resolves.toMatchObject({ confirmedCount: 0, status: "CANCELLED", version: 25 });
+    const page = await reservations.listByClass(session.id, { consistentRead: true, limit: 25 });
+    expect(page.reservations).toHaveLength(21);
+    expect(page.reservations.every(({ status }) => status === "ADMIN_CANCELLED")).toBe(true);
+    const auditPage = await audits.listByEntity("ClassSession", session.id, "2026-08-08T00:00:00Z", "2026-08-09T00:00:00Z");
+    expect(auditPage.entries.map(({ action }) => action)).toEqual([
+      "CLASS_SESSION_CREATED",
+      "CLASS_SESSION_CANCELLED",
+      "CLASS_SESSION_CANCELLATION_BATCH",
+      "CLASS_SESSION_CANCELLATION_BATCH",
+    ]);
+    const resumed = await sessions.cancel({
+      ...cancelInput,
+      auditId: "audit-class-cancel-resumed",
+      expectedVersion: 25,
+      requestKey: "cancel-session-request-resumed",
+      updatedAt: "2026-08-08T15:05:00Z",
+    });
+    expect(resumed).toMatchObject({ confirmedCount: 0, status: "CANCELLED", version: 25 });
+    await expect(sessions.propagateCancellationBatch({
+      actorId: "staff-001",
+      auditId: "audit-class-cancel-resumed-batch",
+      classId: session.id,
+      correlationId: "correlation-class-cancel-resumed",
+      reason: cancelInput.reason,
+      requestKey: "cancel-session-request-resumed",
+      updatedAt: "2026-08-08T15:06:00Z",
+    })).resolves.toMatchObject({ cancelledCount: 0, complete: false, session: { version: 25 } });
+  });
 });

@@ -172,4 +172,36 @@ describe("scheduling repositories", () => {
     });
     expect(port.transactWrite).not.toHaveBeenCalled();
   });
+
+  it("builds a versioned administrative reservation cancellation", () => {
+    const port = createPort();
+    const repository = new ReservationRepository(port, "gym-adr-platform-local");
+    const confirmed = repository.buildConfirmedPut({
+      classId: "class-001",
+      createdAt: "2026-08-08T13:00:00Z",
+      reservationId: "reservation-001",
+      startsAt: "2026-08-10T22:00:00Z",
+      studentId: "student-001",
+    }).reservation;
+
+    const result = repository.buildAdminCancellation(
+      confirmed,
+      "2026-08-08T14:00:00Z",
+    );
+
+    expect(result.reservation).toMatchObject({
+      status: "ADMIN_CANCELLED",
+      version: 2,
+    });
+    expect(result.action).toEqual({
+      Update: expect.objectContaining({
+        ConditionExpression: expect.stringContaining("#status = :confirmed"),
+        ExpressionAttributeValues: expect.objectContaining({
+          ":expectedVersion": 1,
+          ":nextVersion": 2,
+        }),
+        Key: { PK: "CLASS#class-001", SK: "RESERVATION#student-001" },
+      }),
+    });
+  });
 });

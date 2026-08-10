@@ -1,4 +1,4 @@
-import { validateClassSessionQuery, validateCreateClassSession, validateUpdateClassSession } from "@gym-adr/validation";
+import { validateCancelClassSession, validateClassSessionQuery, validateCreateClassSession, validateUpdateClassSession } from "@gym-adr/validation";
 import { describe, expect, it } from "vitest";
 
 describe("class session validation", () => {
@@ -13,5 +13,11 @@ describe("class session validation", () => {
   it("accepts only one valid date query", () => {
     expect(validateClassSessionQuery(new URLSearchParams({ date: "2026-08-10" }))).toMatchObject({ success: true });
     expect(validateClassSessionQuery(new URLSearchParams({ date: "invalid", userId: "other" }))).toMatchObject({ success: false });
+  });
+  it("requires a bounded cancellation reason, version and opaque cursor", () => {
+    expect(validateCancelClassSession({ expectedVersion: 2, reason: "Entrenador no disponible" })).toMatchObject({ success: true });
+    expect(validateCancelClassSession({ expectedVersion: 2, reason: "corto" })).toMatchObject({ success: false });
+    expect(validateCancelClassSession({ cursor: "not valid!", expectedVersion: 2, reason: "Entrenador no disponible" })).toMatchObject({ success: false });
+    expect(validateCancelClassSession({ expectedVersion: 2, reason: "Entrenador no disponible", status: "CANCELLED" })).toMatchObject({ success: false });
   });
 });

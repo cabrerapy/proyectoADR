@@ -17,6 +17,7 @@ import {
   invalidDynamoDbInput,
   mapDynamoDbError,
 } from "./dynamodb-errors";
+import { hashIdempotencyPayload, IdempotencyRepository } from "./idempotency-repository";
 import { operationalIndexKeys, primaryKeys, relationshipIndexKeys } from "./model-keys";
 import { SHARDS, shardForId, type Shard } from "./model-shards";
 import { CURRENT_SCHEMA_VERSION, type PrimaryKey } from "./model-types";
@@ -30,6 +31,7 @@ import {
   schedulingTime,
   schedulingTimestamp,
 } from "./scheduling-validation";
+import { ReservationRepository } from "./reservation-repository";
 
 type TransactionAction = NonNullable<
   TransactWriteCommandInput["TransactItems"]
@@ -72,6 +74,35 @@ export interface UpdateClassSessionInput {
   readonly trainerId: string;
   readonly trainerName: string;
   readonly updatedAt: string;
+}
+
+export interface CancelClassSessionInput {
+  readonly actorId: string;
+  readonly auditId: string;
+  readonly classId: string;
+  readonly correlationId: string;
+  readonly expectedVersion: number;
+  readonly reason: string;
+  readonly requestKey: string;
+  readonly updatedAt: string;
+}
+
+export interface PropagateClassCancellationInput {
+  readonly actorId: string;
+  readonly auditId: string;
+  readonly classId: string;
+  readonly correlationId: string;
+  readonly cursor?: DynamoDbKey;
+  readonly reason: string;
+  readonly requestKey: string;
+  readonly updatedAt: string;
+}
+
+export interface ClassCancellationBatch {
+  readonly cancelledCount: number;
+  readonly complete: boolean;
+  readonly cursor?: DynamoDbKey;
+  readonly session: ClassSession;
 }
 
 export interface ClassSessionPage {
@@ -229,6 +260,153 @@ export class ClassSessionRepository {
       throw mapped;
     }
     return next;
+  }
+
+  async cancel(input: CancelClassSessionInput): Promise<ClassSession> {
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+      throw invalidDynamoDbInput("La versión esperada no es válida.");
+    }
+    const current = await this.getById(input.classId, true);
+    if (current === undefined) {
+      throw new DynamoDbRepositoryError("RESOURCE_NOT_FOUND", "La sesión solicitada no existe.");
+    }
+    const reason = schedulingText(input.reason, "reason", 500);
+    if (reason.length < 8) {
+      throw invalidDynamoDbInput("El motivo debe contener al menos 8 caracteres.");
+    }
+    const updatedAt = schedulingTimestamp(input.updatedAt, "updatedAt");
+    if (current.status === "COMPLETED") {
+      throw classError("CLASS_SESSION_CONFLICT", "Una sesión completada no puede cancelarse.");
+    }
+    const resuming = current.status === "CANCELLED";
+    const next = resuming ? current : this.validatePersisted({
+      ...current,
+      classId: current.id,
+      status: "CANCELLED",
+      updatedAt,
+      version: input.expectedVersion + 1,
+    });
+    const key = primaryKeys.classSession(current.id);
+    await new IdempotencyRepository(this.document, this.table).transactOrReplay({
+      createdAt: updatedAt,
+      operation: "CANCEL_CLASS_SESSION",
+      payload: { actorId: input.actorId, expectedVersion: input.expectedVersion, reason },
+      requestKey: input.requestKey,
+      result: { classId: current.id, status: "CANCELLED", version: next.version },
+      retention: { kind: "DURABLE" },
+      subjectId: current.id,
+    }, [
+      {
+        Put: {
+          ConditionExpression: resuming
+            ? "attribute_exists(#pk) AND #status = :cancelled AND #version = :expectedVersion"
+            : "attribute_exists(#pk) AND #status = :scheduled AND #version = :expectedVersion",
+          ExpressionAttributeNames: {
+            "#pk": "PK",
+            "#status": "status",
+            "#version": "version",
+          },
+          ExpressionAttributeValues: {
+            ":expectedVersion": input.expectedVersion,
+            ...(resuming ? { ":cancelled": "CANCELLED" } : { ":scheduled": "SCHEDULED" }),
+          },
+          Item: this.toItem(next, key),
+          TableName: this.table,
+        },
+      },
+      this.auditAction(next, input.auditId, input.correlationId, resuming ? "CLASS_SESSION_CANCELLATION_RESUMED" : "CLASS_SESSION_CANCELLED", input.actorId, { reason }),
+    ]);
+    const persisted = await this.getById(current.id, true);
+    if (persisted === undefined || persisted.status !== "CANCELLED") {
+      throw classError("CLASS_SESSION_CONFLICT", "La cancelación de la sesión no pudo confirmarse.");
+    }
+    return persisted;
+  }
+
+  async propagateCancellationBatch(
+    input: PropagateClassCancellationInput,
+  ): Promise<ClassCancellationBatch> {
+    const reason = schedulingText(input.reason, "reason", 500);
+    const updatedAt = schedulingTimestamp(input.updatedAt, "updatedAt");
+    const current = await this.getById(input.classId, true);
+    if (current === undefined) {
+      throw new DynamoDbRepositoryError("RESOURCE_NOT_FOUND", "La sesión solicitada no existe.");
+    }
+    if (current.status !== "CANCELLED") {
+      throw classError("CLASS_SESSION_CONFLICT", "La sesión debe estar cancelada antes de propagar reservas.");
+    }
+    const reservations = new ReservationRepository(this.document, this.table);
+    const page = await reservations.listByClass(current.id, {
+      consistentRead: true,
+      ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+      limit: 20,
+    });
+    const confirmed = page.reservations.filter(({ status }) => status === "CONFIRMED");
+    const actions = confirmed.map((reservation) =>
+      reservations.buildAdminCancellation(reservation, updatedAt).action
+    );
+    let nextSession = current;
+    if (confirmed.length > 0) {
+      nextSession = {
+        ...current,
+        confirmedCount: current.confirmedCount - confirmed.length,
+        updatedAt,
+        version: current.version + 1,
+      };
+      if (nextSession.confirmedCount < 0) {
+        throw classError("CLASS_SESSION_CONFLICT", "El contador confirmado no admite este lote.");
+      }
+      actions.push({
+        Update: {
+          ConditionExpression:
+            "attribute_exists(#pk) AND #status = :cancelled AND #version = :expectedVersion AND #confirmedCount = :expectedCount AND #confirmedCount >= :batchCount",
+          ExpressionAttributeNames: {
+            "#confirmedCount": "confirmedCount",
+            "#pk": "PK",
+            "#status": "status",
+            "#updatedAt": "updatedAt",
+            "#version": "version",
+          },
+          ExpressionAttributeValues: {
+            ":batchCount": confirmed.length,
+            ":cancelled": "CANCELLED",
+            ":expectedCount": current.confirmedCount,
+            ":expectedVersion": current.version,
+            ":nextCount": nextSession.confirmedCount,
+            ":nextVersion": nextSession.version,
+            ":updatedAt": updatedAt,
+          },
+          Key: primaryKeys.classSession(current.id),
+          TableName: this.table,
+          UpdateExpression:
+            "SET #confirmedCount = :nextCount, #updatedAt = :updatedAt, #version = :nextVersion",
+        },
+      });
+    }
+    actions.push(this.auditAction(nextSession, input.auditId, input.correlationId, "CLASS_SESSION_CANCELLATION_BATCH", input.actorId, { cancelledCount: confirmed.length, reason }));
+    const batchKey = hashIdempotencyPayload({
+      cursor: input.cursor === undefined ? null : JSON.stringify(input.cursor),
+      requestKey: input.requestKey,
+    });
+    await new IdempotencyRepository(this.document, this.table).transactOrReplay({
+      createdAt: updatedAt,
+      operation: "PROPAGATE_CLASS_CANCELLATION",
+      payload: { actorId: input.actorId, batchKey, classId: current.id, reason },
+      requestKey: batchKey,
+      result: { cancelledCount: confirmed.length, complete: page.cursor === undefined },
+      retention: { kind: "DURABLE" },
+      subjectId: current.id,
+    }, actions);
+    const persisted = await this.getById(current.id, true);
+    if (persisted === undefined || persisted.status !== "CANCELLED") {
+      throw classError("CLASS_SESSION_CONFLICT", "El lote de cancelación no pudo confirmarse.");
+    }
+    return {
+      cancelledCount: confirmed.length,
+      complete: page.cursor === undefined,
+      ...(page.cursor === undefined ? {} : { cursor: page.cursor }),
+      session: persisted,
+    };
   }
 
   async prepareReserveCapacityUpdate(
@@ -407,13 +585,13 @@ export class ClassSessionRepository {
     };
   }
 
-  private auditAction(session: ClassSession, auditId: string, correlationId: string, action: string, actorId: string): TransactionAction {
+  private auditAction(session: ClassSession, auditId: string, correlationId: string, action: string, actorId: string, extraDetails: Readonly<Record<string, number | string>> = {}): TransactionAction {
     return new AuditLogRepository(this.document, this.table).createAppendAction({
       action,
       actorId,
       auditId,
       correlationId,
-      details: { capacity: session.capacity, classTypeId: session.classTypeId, startsAt: session.startsAt, trainerId: session.trainerId, version: session.version },
+      details: { capacity: session.capacity, classTypeId: session.classTypeId, startsAt: session.startsAt, trainerId: session.trainerId, version: session.version, ...extraDetails },
       result: "SUCCEEDED",
       targetId: session.id,
       targetType: "ClassSession",

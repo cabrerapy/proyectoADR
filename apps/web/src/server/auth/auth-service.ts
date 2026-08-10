@@ -16,7 +16,10 @@ import {
   type RecordPaymentInput,
   type CreateSchedulingCatalogInput,
   type CreateClassSessionInput,
+  type CancelClassSessionInput,
+  type ClassCancellationBatch,
   type ClassSessionPage,
+  type PropagateClassCancellationInput,
   type UpdateClassSessionInput,
   type SchedulingCatalogCursors,
   type SchedulingCatalogPage,
@@ -48,6 +51,7 @@ import {
 } from "@gym-adr/domain";
 import type {
   AdminStudentQuery,
+  CancelClassSessionCommand,
   ClassSessionCommand,
   ClassSessionQuery,
   AdminPaymentQuery,
@@ -152,9 +156,11 @@ export interface SchedulingCatalogPort {
 }
 
 export interface ClassSessionPort {
+  cancel(input: CancelClassSessionInput): Promise<ClassSession>;
   create(input: CreateClassSessionInput): Promise<ClassSession>;
   getById(id: string, consistentRead?: boolean): Promise<ClassSession | undefined>;
   listByDate(date: string): Promise<ClassSessionPage>;
+  propagateCancellationBatch(input: PropagateClassCancellationInput): Promise<ClassCancellationBatch>;
   update(input: UpdateClassSessionInput): Promise<ClassSession>;
 }
 
@@ -521,6 +527,25 @@ const decodeCatalogCursor = (cursor: string | undefined, kind: "class-types" | "
   } catch { throw new ApiError(422, apiErrorCodes.validationError, "El cursor del catálogo no es válido."); }
 };
 const encodeCatalogCursor = (cursors: SchedulingCatalogCursors | undefined, kind: "class-types" | "trainers", query: SchedulingCatalogQuery): string | undefined => cursors === undefined ? undefined : Buffer.from(JSON.stringify({ cursors, identity: catalogCursorIdentity(kind, query) }), "utf8").toString("base64url");
+const classCancellationIdentity = (classId: string, requestKey: string): string =>
+  createHash("sha256").update(`${classId}\0${requestKey}`, "utf8").digest("hex");
+const decodeClassCancellationCursor = (cursor: string | undefined, classId: string, requestKey: string): DynamoDbKey | undefined => {
+  if (cursor === undefined) return undefined;
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error();
+    const record = value as Record<string, unknown>;
+    if (record.identity !== classCancellationIdentity(classId, requestKey) || !isCursorKey(record.cursor)) throw new Error();
+    const key = record.cursor;
+    if (Object.keys(key).length !== 2 || key.PK !== `CLASS#${classId}` || !key.SK?.startsWith("RESERVATION#")) throw new Error();
+    return key;
+  } catch {
+    throw new ApiError(422, apiErrorCodes.validationError, "El cursor de cancelación no es válido.");
+  }
+};
+const encodeClassCancellationCursor = (cursor: DynamoDbKey | undefined, classId: string, requestKey: string): string | undefined => cursor === undefined
+  ? undefined
+  : Buffer.from(JSON.stringify({ cursor, identity: classCancellationIdentity(classId, requestKey) }), "utf8").toString("base64url");
 
 export class AuthService {
   private readonly clock: () => Date;
@@ -1049,6 +1074,74 @@ export class AuthService {
         if (error.code === "CLASS_SESSION_CONFLICT") throw new ApiError(409, apiErrorCodes.conflict, "La sesión cambió o la capacidad no admite la edición.");
       }
       throw new ApiError(502, apiErrorCodes.internalError, "No fue posible actualizar la sesión.");
+    }
+  }
+
+  async cancelAdminClassSession(
+    request: Request,
+    correlationId: string,
+    classId: string,
+    input: CancelClassSessionCommand,
+  ): Promise<{ readonly propagation: { readonly cancelledCount: number; readonly complete: boolean; readonly cursor?: string }; readonly session: ClassSession }> {
+    this.assertSameOrigin(request);
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "class-session-cancel"), 20);
+    const requestKey = request.headers.get("idempotency-key");
+    if (requestKey === null || !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u.test(requestKey)) {
+      throw new ApiError(422, apiErrorCodes.validationError, "La clave de idempotencia no es válida.");
+    }
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("CLASS_SESSION_MANAGE");
+      const cursor = decodeClassCancellationCursor(input.cursor, classId, requestKey);
+      const operationHash = createHash("sha256")
+        .update(`${principal.id}\0${classId}\0${requestKey}`, "utf8")
+        .digest("hex")
+        .slice(0, 32);
+      const now = this.clock().toISOString();
+      await this.classSessionRepository().cancel({
+        actorId: principal.id,
+        auditId: `audit-cancel-${operationHash}`,
+        classId,
+        correlationId,
+        expectedVersion: input.expectedVersion,
+        reason: input.reason,
+        requestKey,
+        updatedAt: now,
+      });
+      const batchHash = createHash("sha256")
+        .update(`${operationHash}\0${input.cursor ?? "first"}`, "utf8")
+        .digest("hex")
+        .slice(0, 32);
+      const batch = await this.classSessionRepository().propagateCancellationBatch({
+        actorId: principal.id,
+        auditId: `audit-cancel-batch-${batchHash}`,
+        classId,
+        correlationId,
+        ...(cursor === undefined ? {} : { cursor }),
+        reason: input.reason,
+        requestKey,
+        updatedAt: now,
+      });
+      const encodedCursor = encodeClassCancellationCursor(batch.cursor, classId, requestKey);
+      return {
+        propagation: {
+          cancelledCount: batch.cancelledCount,
+          complete: batch.complete,
+          ...(encodedCursor === undefined ? {} : { cursor: encodedCursor }),
+        },
+        session: batch.session,
+      };
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      if (error instanceof DynamoDbRepositoryError) {
+        if (error.code === "RESOURCE_NOT_FOUND") throw new ApiError(404, apiErrorCodes.notFound, "No se encontró la sesión.");
+        if (error.code === "INVALID_INPUT") throw new ApiError(422, apiErrorCodes.validationError, "Los datos de cancelación no son válidos.");
+        if (error.code === "CLASS_SESSION_CONFLICT" || error.code === "IDEMPOTENCY_CONFLICT" || error.code === "TRANSACTION_CANCELLED" || error.code === "CONDITIONAL_CHECK_FAILED") {
+          throw new ApiError(409, apiErrorCodes.conflict, "La sesión cambió o la cancelación ya fue solicitada con datos distintos.");
+        }
+      }
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible cancelar la sesión.");
     }
   }
 
