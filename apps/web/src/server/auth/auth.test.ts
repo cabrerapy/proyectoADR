@@ -5,7 +5,7 @@ import {
   SignJWT,
 } from "jose";
 import type { CreatePendingUserResult } from "@gym-adr/data-access";
-import type { Membership, MembershipPlan, Payment, UserProfile } from "@gym-adr/domain";
+import type { ClassType, Membership, MembershipPlan, Payment, Trainer, UserProfile } from "@gym-adr/domain";
 import {
   validateAdminStudentQuery,
   validateCompleteProfile,
@@ -20,7 +20,7 @@ import {
 import { describe, expect, it, vi } from "vitest";
 
 import { resolveAuthConfig, type AuthConfig } from "./auth-config";
-import { AuthService, type MembershipPlanPort, type MembershipPort, type PaymentPort, type PendingUserPort } from "./auth-service";
+import { AuthService, type MembershipPlanPort, type MembershipPort, type PaymentPort, type PendingUserPort, type SchedulingCatalogPort } from "./auth-service";
 import { CognitoTokenClient, type CognitoTokenPort } from "./cognito-client";
 import { oauthCookieNames, sessionCookieName } from "./cookies";
 import { FixedWindowRateLimiter } from "./rate-limiter";
@@ -297,9 +297,18 @@ describe("OAuth session service", () => {
       issue: vi.fn(async () => ({ headers: { "content-type": "application/pdf" }, key: "payment-receipts/test.pdf", uploadUrl: "/signed-upload" })),
       issueDownload: vi.fn(async () => "/signed-download"),
     };
+    const catalogPort: SchedulingCatalogPort = {
+      createClassType: vi.fn(async (input) => ({ createdAt: input.createdAt, createdBy: input.actorId, ...(input.description === undefined ? {} : { description: input.description }), id: input.id, name: input.name, status: "ACTIVE", updatedAt: input.createdAt, updatedBy: input.actorId, version: 1 } satisfies ClassType)),
+      createTrainer: vi.fn(async (input) => ({ createdAt: input.createdAt, createdBy: input.actorId, ...(input.description === undefined ? {} : { bio: input.description }), id: input.id, name: input.name, status: "ACTIVE", updatedAt: input.createdAt, updatedBy: input.actorId, version: 1 } satisfies Trainer)),
+      listClassTypes: vi.fn(async () => ({ items: [] })),
+      listTrainers: vi.fn(async () => ({ items: [] })),
+      updateClassType: vi.fn(async (input) => ({ createdAt: "2026-08-08T10:00:00Z", createdBy: "admin", ...(input.description === undefined ? {} : { description: input.description }), id: input.id, name: input.name, status: input.status, updatedAt: input.updatedAt, updatedBy: input.actorId, version: input.expectedVersion + 1 } satisfies ClassType)),
+      updateTrainer: vi.fn(async (input) => ({ createdAt: "2026-08-08T10:00:00Z", createdBy: "admin", ...(input.description === undefined ? {} : { bio: input.description }), id: input.id, name: input.name, status: input.status, updatedAt: input.updatedAt, updatedBy: input.actorId, version: input.expectedVersion + 1 } satisfies Trainer)),
+    };
     let sequence = 0;
     const service = new AuthService({
       clock: () => new Date("2026-08-08T12:00:00Z"),
+      catalog: catalogPort,
       config,
       ids: () => `user-${++sequence}`,
       memberships: membershipPort,
@@ -310,7 +319,7 @@ describe("OAuth session service", () => {
       tokens,
       users: userPort,
     });
-    return { completed, membershipPort, memberships, paymentPort, paymentRecords, planPort, plans, receiptPort, service, tokens, userPort, users };
+    return { catalogPort, completed, membershipPort, memberships, paymentPort, paymentRecords, planPort, plans, receiptPort, service, tokens, userPort, users };
   };
 
   it("starts authorization with state, nonce, S256 PKCE and hardened cookies", () => {
@@ -1044,6 +1053,24 @@ describe("OAuth session service", () => {
     completed.set(actor.userId, { ...completed.get(actor.userId)!, roles: ["STUDENT"] });
     await expect(service.recordAdminPayment(request(), "correlation-3", command))
       .rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+  });
+
+  it("allows catalog reads to STAFF and restricts create or soft-delete to ADMIN", async () => {
+    const staffSetup = setup();
+    const staffIdentity = { ...identity, createdAt: "2026-08-08T12:00:00Z", userId: "staff-catalog" };
+    await staffSetup.userPort.createPending(staffIdentity);
+    staffSetup.completed.set(staffIdentity.userId, { createdAt: staffIdentity.createdAt, displayName: "Staff", email: staffIdentity.email, emailVerified: true, id: staffIdentity.userId, roles: ["STAFF"], status: "ACTIVE", updatedAt: staffIdentity.createdAt, version: 2 });
+    const readRequest = new Request("https://app.example.com/api/v1/admin/trainers", { headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token` } });
+    await expect(staffSetup.service.listAdminSchedulingCatalog(readRequest, "trainers", { status: "ALL" })).resolves.toMatchObject({ capabilities: { canManage: false } });
+    const writeRequest = () => new Request("https://app.example.com/api/v1/admin/trainers", { headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token`, origin: config.appBaseUrl }, method: "POST" });
+    await expect(staffSetup.service.createAdminSchedulingCatalog(writeRequest(), "correlation-1", "trainers", { name: "Entrenador" })).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+
+    const adminSetup = setup();
+    const adminIdentity = { ...identity, createdAt: "2026-08-08T12:00:00Z", userId: "admin-catalog" };
+    await adminSetup.userPort.createPending(adminIdentity);
+    adminSetup.completed.set(adminIdentity.userId, { createdAt: adminIdentity.createdAt, displayName: "Admin", email: adminIdentity.email, emailVerified: true, id: adminIdentity.userId, roles: ["ADMIN"], status: "ACTIVE", updatedAt: adminIdentity.createdAt, version: 2 });
+    const created = await adminSetup.service.createAdminSchedulingCatalog(writeRequest(), "correlation-2", "trainers", { name: "Entrenador" });
+    await expect(adminSetup.service.updateAdminSchedulingCatalog(new Request("https://app.example.com/api/v1/admin/trainers/id", { headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token`, origin: config.appBaseUrl }, method: "PATCH" }), "correlation-3", "trainers", created.id, { expectedVersion: 1, name: created.name, status: "INACTIVE" })).resolves.toMatchObject({ status: "INACTIVE", version: 2 });
   });
 
   it("allows only active ADMIN to create linked, idempotent payment corrections", async () => {

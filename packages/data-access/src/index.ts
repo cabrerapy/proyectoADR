@@ -4,6 +4,7 @@ import type { EntityId } from "@gym-adr/shared";
 export * from "./base-repository";
 export * from "./audit-log-repository";
 export * from "./class-session-repository";
+export * from "./scheduling-catalog-repository";
 export * from "./dynamodb-adapter";
 export * from "./dynamodb-config";
 export * from "./dynamodb-errors";

@@ -8,8 +8,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   ClassSessionRepository,
   createDynamoDbAdapter,
-  primaryKeys,
   ReservationRepository,
+  SchedulingCatalogRepository,
+  AuditLogRepository,
 } from "./index";
 
 const enabled = process.env.DYNAMODB_LOCAL_INTEGRATION === "1";
@@ -25,6 +26,8 @@ const client = new DynamoDBClient({
 const adapter = createDynamoDbAdapter({ environment: "local" });
 const sessions = new ClassSessionRepository(adapter, tableName);
 const reservations = new ReservationRepository(adapter, tableName);
+const catalog = new SchedulingCatalogRepository(adapter, tableName);
+const audits = new AuditLogRepository(adapter, tableName);
 
 const firstClass = {
   capacity: 16,
@@ -79,24 +82,8 @@ describe.skipIf(!enabled)("scheduling repositories with DynamoDB Local", () => {
         TableName: tableName,
       }),
     );
-    await adapter.put({
-      Item: {
-        ...primaryKeys.trainer("trainer-001"),
-        entityType: "Trainer",
-        schemaVersion: 1,
-        status: "ACTIVE",
-      },
-      TableName: tableName,
-    });
-    await adapter.put({
-      Item: {
-        ...primaryKeys.classType("type-001"),
-        entityType: "ClassType",
-        schemaVersion: 1,
-        status: "ACTIVE",
-      },
-      TableName: tableName,
-    });
+    await catalog.createTrainer({ actorId: "admin-001", auditId: "audit-trainer-001", correlationId: "correlation-trainer-001", createdAt: "2026-08-08T10:00:00Z", id: "trainer-001", name: "Entrenador Uno" });
+    await catalog.createClassType({ actorId: "admin-001", auditId: "audit-type-001", correlationId: "correlation-type-001", createdAt: "2026-08-08T10:00:00Z", id: "type-001", name: "Cross training" });
   });
 
   afterAll(async () => {
@@ -104,8 +91,21 @@ describe.skipIf(!enabled)("scheduling repositories with DynamoDB Local", () => {
       await client.send(new DeleteTableCommand({ TableName: tableName }));
     } finally {
       sessions.destroy();
+      catalog.destroy();
       client.destroy();
     }
+  });
+
+  it("creates, lists and soft-deletes catalog entries with immutable audit", async () => {
+    const trainer = await catalog.createTrainer({ actorId: "admin-001", auditId: "audit-trainer-002", correlationId: "correlation-trainer-002", createdAt: "2026-08-08T10:10:00Z", description: "Especialista en fuerza", id: "trainer-002", name: "Entrenadora Dos" });
+    await expect(catalog.listTrainers("ACTIVE")).resolves.toMatchObject({ items: expect.arrayContaining([expect.objectContaining({ id: trainer.id })]) });
+    await expect(catalog.updateTrainer({ actorId: "admin-001", auditId: "audit-trainer-inactive", correlationId: "correlation-trainer-inactive", ...(trainer.bio === undefined ? {} : { description: trainer.bio }), expectedVersion: trainer.version, id: trainer.id, name: trainer.name, status: "INACTIVE", updatedAt: "2026-08-08T10:20:00Z" })).resolves.toMatchObject({ id: trainer.id, status: "INACTIVE", version: 2 });
+    await expect(catalog.getTrainer(trainer.id)).resolves.toMatchObject({ id: trainer.id, status: "INACTIVE" });
+    const auditPage = await audits.listByEntity("Trainer", trainer.id, "2026-08-08T00:00:00Z", "2026-08-09T00:00:00Z");
+    expect(auditPage.entries.map(({ action }) => action)).toEqual(["TRAINER_CREATED", "TRAINER_STATUS_INACTIVE"]);
+    const classType = await catalog.createClassType({ actorId: "admin-001", auditId: "audit-type-002", correlationId: "correlation-type-002", createdAt: "2026-08-08T10:30:00Z", description: "Trabajo de movilidad", id: "type-002", name: "Movilidad" });
+    await expect(catalog.updateClassType({ actorId: "admin-001", auditId: "audit-type-inactive", correlationId: "correlation-type-inactive", ...(classType.description === undefined ? {} : { description: classType.description }), expectedVersion: classType.version, id: classType.id, name: classType.name, status: "INACTIVE", updatedAt: "2026-08-08T10:40:00Z" })).resolves.toMatchObject({ id: classType.id, status: "INACTIVE", version: 2 });
+    await expect(catalog.listClassTypes("INACTIVE")).resolves.toMatchObject({ items: [expect.objectContaining({ id: classType.id })] });
   });
 
   it("resolves sessions by id, date, trainer and available period", async () => {

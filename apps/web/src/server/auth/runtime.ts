@@ -9,6 +9,7 @@ import {
   MembershipRepository,
   MembershipPlanRepository,
   PaymentRepository,
+  SchedulingCatalogRepository,
   SearchTokenService,
   UserRepository,
 } from "@gym-adr/data-access";
@@ -118,6 +119,7 @@ const createService = async (): Promise<AuthService> => {
         return new S3ReceiptUploadSigner(new S3Client({ region }), bucket);
       })();
   return new AuthService({
+    catalog: new SchedulingCatalogRepository(adapter, tableName),
     config,
     rateLimiter: limiter,
     memberships: new MembershipRepository(adapter, tableName),

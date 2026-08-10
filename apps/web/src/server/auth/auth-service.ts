@@ -14,6 +14,10 @@ import {
   type PaymentPage,
   type PaymentMutationResult,
   type RecordPaymentInput,
+  type CreateSchedulingCatalogInput,
+  type SchedulingCatalogCursors,
+  type SchedulingCatalogPage,
+  type UpdateSchedulingCatalogInput,
   type VoidPaymentInput,
   type TransitionUserStatusInput,
   type UpdateMembershipPlanInput,
@@ -33,6 +37,8 @@ import {
   type Payment,
   type PaymentCorrection,
   type PaymentStatus,
+  type ClassType,
+  type Trainer,
   type UserProfile,
   type UserStatus,
 } from "@gym-adr/domain";
@@ -51,8 +57,11 @@ import type {
   PaymentReceiptQuery,
   PaymentReceiptUploadCommand,
   RecordPaymentCommand,
+  SchedulingCatalogCommand,
+  SchedulingCatalogQuery,
   TransitionStudentStatusInput,
   UpdateMembershipPlanCommand,
+  UpdateSchedulingCatalogCommand,
   UpdateMembershipCommand,
   UpdateOwnProfileInput,
 } from "@gym-adr/validation";
@@ -122,6 +131,15 @@ export interface PaymentPort {
   listHistory(userId: string, options?: { readonly consistentRead?: boolean; readonly cursor?: DynamoDbKey; readonly limit?: number }): Promise<{ readonly cursor?: DynamoDbKey; readonly payments: readonly Payment[] }>;
   record(input: RecordPaymentInput): Promise<PaymentMutationResult<Payment>>;
   voidConfirmed(input: VoidPaymentInput): Promise<PaymentMutationResult<PaymentCorrection>>;
+}
+
+export interface SchedulingCatalogPort {
+  createClassType(input: CreateSchedulingCatalogInput): Promise<ClassType>;
+  createTrainer(input: CreateSchedulingCatalogInput): Promise<Trainer>;
+  listClassTypes(status?: "ACTIVE" | "INACTIVE" | "ALL", cursors?: SchedulingCatalogCursors): Promise<SchedulingCatalogPage<ClassType>>;
+  listTrainers(status?: "ACTIVE" | "INACTIVE" | "ALL", cursors?: SchedulingCatalogCursors): Promise<SchedulingCatalogPage<Trainer>>;
+  updateClassType(input: UpdateSchedulingCatalogInput): Promise<ClassType>;
+  updateTrainer(input: UpdateSchedulingCatalogInput): Promise<Trainer>;
 }
 
 export interface OnboardingProfile {
@@ -203,10 +221,16 @@ export interface PaymentQueryPage {
   readonly cursor?: string;
   readonly payments: readonly PaymentView[];
 }
+export interface SchedulingCatalogViewPage {
+  readonly capabilities: { readonly canManage: boolean };
+  readonly cursor?: string;
+  readonly items: readonly (ClassType | Trainer)[];
+}
 
 export interface AuthServiceDependencies {
   readonly clock?: () => Date;
   readonly config: AuthConfig;
+  readonly catalog?: SchedulingCatalogPort;
   readonly ids?: () => string;
   readonly memberships?: MembershipPort;
   readonly payments?: PaymentPort;
@@ -459,6 +483,20 @@ const decodePaymentQueryCursor = (cursor: string | undefined, query: AdminPaymen
 const encodePaymentQueryCursor = (query: AdminPaymentQuery, cursors: PaymentPage["cursors"]): string | undefined => cursors === undefined
   ? undefined
   : Buffer.from(JSON.stringify({ cursors, query: paymentQueryIdentity(query) }), "utf8").toString("base64url");
+const catalogCursorIdentity = (kind: "class-types" | "trainers", query: SchedulingCatalogQuery): string => `${kind}:${query.status}`;
+const decodeCatalogCursor = (cursor: string | undefined, kind: "class-types" | "trainers", query: SchedulingCatalogQuery): SchedulingCatalogCursors | undefined => {
+  if (cursor === undefined) return undefined;
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error();
+    const record = value as Record<string, unknown>;
+    if (record.identity !== catalogCursorIdentity(kind, query) || typeof record.cursors !== "object" || record.cursors === null || Array.isArray(record.cursors)) throw new Error();
+    const entries = Object.entries(record.cursors as Record<string, unknown>);
+    if (entries.some(([, entry]) => entry !== null && !isCursorKey(entry))) throw new Error();
+    return Object.fromEntries(entries) as SchedulingCatalogCursors;
+  } catch { throw new ApiError(422, apiErrorCodes.validationError, "El cursor del catálogo no es válido."); }
+};
+const encodeCatalogCursor = (cursors: SchedulingCatalogCursors | undefined, kind: "class-types" | "trainers", query: SchedulingCatalogQuery): string | undefined => cursors === undefined ? undefined : Buffer.from(JSON.stringify({ cursors, identity: catalogCursorIdentity(kind, query) }), "utf8").toString("base64url");
 
 export class AuthService {
   private readonly clock: () => Date;
@@ -838,6 +876,80 @@ export class AuthService {
         }
       }
       throw new ApiError(502, apiErrorCodes.internalError, "No fue posible actualizar el plan.");
+    }
+  }
+
+  async listAdminSchedulingCatalog(
+    request: Request,
+    kind: "class-types" | "trainers",
+    query: SchedulingCatalogQuery,
+  ): Promise<SchedulingCatalogViewPage> {
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "scheduling-catalog-read"), 60);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("TRAINER_CLASS_TYPE_READ");
+      const cursors = decodeCatalogCursor(query.cursor, kind, query);
+      const page = kind === "trainers"
+        ? await this.catalogRepository().listTrainers(query.status, cursors)
+        : await this.catalogRepository().listClassTypes(query.status, cursors);
+      const cursor = encodeCatalogCursor(page.cursors, kind, query);
+      return {
+        capabilities: { canManage: principal.roles.includes("ADMIN") },
+        ...(cursor === undefined ? {} : { cursor }),
+        items: page.items,
+      };
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible consultar el catálogo de clases.");
+    }
+  }
+
+  async createAdminSchedulingCatalog(
+    request: Request,
+    correlationId: string,
+    kind: "class-types" | "trainers",
+    input: SchedulingCatalogCommand,
+  ): Promise<ClassType | Trainer> {
+    this.assertSameOrigin(request);
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "scheduling-catalog-write"), 20);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("TRAINER_CLASS_TYPE_MANAGE");
+      const command = { ...input, actorId: principal.id, auditId: this.ids(), correlationId, createdAt: this.clock().toISOString(), id: this.ids() };
+      return kind === "trainers"
+        ? await this.catalogRepository().createTrainer(command)
+        : await this.catalogRepository().createClassType(command);
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof DynamoDbRepositoryError && error.code === "CATALOG_CONFLICT") throw new ApiError(409, apiErrorCodes.conflict, "El elemento ya existe.");
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible crear el elemento.");
+    }
+  }
+
+  async updateAdminSchedulingCatalog(
+    request: Request,
+    correlationId: string,
+    kind: "class-types" | "trainers",
+    id: string,
+    input: UpdateSchedulingCatalogCommand,
+  ): Promise<ClassType | Trainer> {
+    this.assertSameOrigin(request);
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "scheduling-catalog-write"), 20);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("TRAINER_CLASS_TYPE_MANAGE");
+      const command = { ...input, actorId: principal.id, auditId: this.ids(), correlationId, id, updatedAt: this.clock().toISOString() };
+      return kind === "trainers"
+        ? await this.catalogRepository().updateTrainer(command)
+        : await this.catalogRepository().updateClassType(command);
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof DynamoDbRepositoryError) {
+        if (error.code === "RESOURCE_NOT_FOUND") throw new ApiError(404, apiErrorCodes.notFound, "No se encontró el elemento.");
+        if (error.code === "CATALOG_CONFLICT") throw new ApiError(409, apiErrorCodes.conflict, "El elemento cambió. Actualiza antes de reintentar.");
+      }
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible actualizar el elemento.");
     }
   }
 
@@ -1317,6 +1429,11 @@ export class AuthService {
       throw new ApiError(500, apiErrorCodes.internalError, "El servicio de planes no está configurado.");
     }
     return this.dependencies.plans;
+  }
+
+  private catalogRepository(): SchedulingCatalogPort {
+    if (this.dependencies.catalog === undefined) throw new ApiError(500, apiErrorCodes.internalError, "El catálogo de clases no está configurado.");
+    return this.dependencies.catalog;
   }
 
   private membershipRepository(): MembershipPort {
