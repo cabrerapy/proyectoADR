@@ -116,6 +116,7 @@ export interface Payment {
   readonly amount: number;
   readonly createdAt: string;
   readonly currency: string;
+  readonly correctionType?: "ADJUSTMENT" | "COMPENSATION";
   readonly id: EntityId;
   readonly membershipId: EntityId;
   readonly method: PaymentMethod;
@@ -124,6 +125,7 @@ export interface Payment {
   readonly paymentDate: string;
   readonly periodEnd: string;
   readonly periodStart: string;
+  readonly originalPaymentId?: EntityId;
   readonly receiptKey?: string;
   readonly recordedBy: EntityId;
   readonly status: PaymentStatus;
@@ -140,6 +142,7 @@ export interface PaymentCorrection {
   readonly id: EntityId;
   readonly originalPaymentId: EntityId;
   readonly reason: string;
+  readonly relatedPaymentId?: EntityId;
   readonly type: PaymentCorrectionType;
   readonly userId: EntityId;
 }

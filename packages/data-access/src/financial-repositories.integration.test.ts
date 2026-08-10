@@ -252,9 +252,43 @@ describe.skipIf(!enabled)("financial repositories with DynamoDB Local", () => {
     )).resolves.toMatchObject({ entries: [{ action: "PAYMENT_RECORDED" }] });
   });
 
+  it("records a linked adjustment without overwriting the original payment", async () => {
+    const adjustment = {
+      ...paymentInput,
+      amount: 25_000,
+      auditId: "audit-adjustment-001",
+      correlationId: "correlation-adjustment-001",
+      correction: {
+        expectedOriginalVersion: 1,
+        originalPaidAt: paymentInput.paidAt,
+        originalPaymentId: paymentInput.paymentId,
+        reason: "Diferencia administrativa documentada",
+        type: "ADJUSTMENT" as const,
+      },
+      createdAt: "2026-08-08T13:30:00Z",
+      notes: "Diferencia administrativa documentada",
+      paidAt: "2026-08-08T13:30:00Z",
+      paymentId: "payment-adjustment-001",
+      recordedBy: "admin-001",
+      requestKey: "request-adjustment-001",
+    };
+    await expect(payments.record(adjustment)).resolves.toMatchObject({
+      disposition: "CREATED",
+      value: { correctionType: "ADJUSTMENT", originalPaymentId: "payment-001" },
+    });
+    await expect(payments.record({ ...adjustment, createdAt: "2026-08-08T13:31:00Z", paidAt: "2026-08-08T13:31:00Z" }))
+      .resolves.toMatchObject({ disposition: "REPLAYED", value: { id: "payment-adjustment-001" } });
+    await expect(payments.getById(paymentInput.userId, paymentInput.paidAt, paymentInput.paymentId))
+      .resolves.toMatchObject({ amount: 250_000, status: "CONFIRMED", version: 1 });
+    await expect(audits.listByEntity("Payment", "payment-adjustment-001", "2026-08-08T00:00:00Z", "2026-08-09T00:00:00Z"))
+      .resolves.toMatchObject({ entries: [{ action: "PAYMENT_ADJUSTMENT", actorId: "admin-001" }] });
+  });
+
   it("voids idempotently without deleting the confirmed payment history", async () => {
     const input = {
       actorId: "admin-001",
+      auditId: "audit-void-001",
+      correlationId: "correlation-void-001",
       correctedAt: "2026-08-08T14:00:00Z",
       correctionId: "correction-001",
       expectedVersion: 1,
@@ -279,10 +313,16 @@ describe.skipIf(!enabled)("financial repositories with DynamoDB Local", () => {
       payments.getById(paymentInput.userId, paymentInput.paidAt, paymentInput.paymentId),
     ).resolves.toMatchObject({ status: "VOIDED", version: 2 });
     await expect(payments.listByStatus("CONFIRMED"))
-      .resolves.toMatchObject({ payments: [] });
+      .resolves.toMatchObject({ payments: [{ id: "payment-adjustment-001", originalPaymentId: "payment-001" }] });
     await expect(payments.listByStatus("VOIDED"))
       .resolves.toMatchObject({ payments: [{ id: "payment-001" }] });
-    await expect(payments.listByDate("2026-08-08"))
-      .resolves.toMatchObject({ payments: [{ id: "payment-001", status: "VOIDED" }] });
+    const datePage = await payments.listByDate("2026-08-08");
+    expect(datePage.payments).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "payment-001", status: "VOIDED" }),
+    ]));
+    const auditPage = await audits.listByEntity("Payment", "payment-001", "2026-08-08T00:00:00Z", "2026-08-09T00:00:00Z");
+    expect(auditPage.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "PAYMENT_VOIDED", actorId: "admin-001" }),
+    ]));
   });
 });

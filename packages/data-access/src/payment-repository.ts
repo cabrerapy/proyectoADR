@@ -32,6 +32,7 @@ import {
 } from "./financial-validation";
 import {
   IdempotencyRepository,
+  type IdempotencyResult,
   type JsonValue,
   type TransactionAction,
 } from "./idempotency-repository";
@@ -44,6 +45,13 @@ export interface RecordPaymentInput {
   readonly amount: number;
   readonly auditId: string;
   readonly correlationId: string;
+  readonly correction?: {
+    readonly expectedOriginalVersion: number;
+    readonly originalPaidAt: string;
+    readonly originalPaymentId: string;
+    readonly reason: string;
+    readonly type: "ADJUSTMENT" | "COMPENSATION";
+  };
   readonly createdAt: string;
   readonly currency: string;
   readonly membershipId: string;
@@ -64,6 +72,8 @@ export interface RecordPaymentInput {
 
 export interface VoidPaymentInput {
   readonly actorId: string;
+  readonly auditId: string;
+  readonly correlationId: string;
   readonly correctedAt: string;
   readonly correctionId: string;
   readonly expectedVersion: number;
@@ -88,10 +98,12 @@ interface PaymentItem extends DynamoDbItem {
   readonly amount: number;
   readonly createdAt: string;
   readonly currency: string;
+  readonly correctionType?: "ADJUSTMENT" | "COMPENSATION";
   readonly entityType: "Payment";
   readonly membershipId: string;
   readonly method: PaymentMethod;
   readonly notes?: string;
+  readonly originalPaymentId?: string;
   readonly paidAt: string;
   readonly paymentDate: string;
   readonly paymentId: string;
@@ -151,7 +163,20 @@ export class PaymentRepository {
   }
 
   async record(input: RecordPaymentInput): Promise<PaymentMutationResult<Payment>> {
-    const payment = this.validatePayment(input);
+    const basePayment = this.validatePayment(input);
+    const correction = input.correction === undefined ? undefined : {
+      expectedOriginalVersion: input.correction.expectedOriginalVersion,
+      originalPaidAt: financialTimestamp(input.correction.originalPaidAt, "originalPaidAt"),
+      originalPaymentId: financialId(input.correction.originalPaymentId, "originalPaymentId"),
+      reason: financialText(input.correction.reason, "reason", 500),
+      type: input.correction.type,
+    };
+    if (correction !== undefined && (!Number.isSafeInteger(correction.expectedOriginalVersion) || correction.expectedOriginalVersion < 1)) throw invalidDynamoDbInput("La versión original no es válida.");
+    const payment: Payment = correction === undefined ? basePayment : {
+      ...basePayment,
+      correctionType: correction.type,
+      originalPaymentId: correction.originalPaymentId,
+    };
     const membershipStartDate = financialDate(
       input.membershipStartDate,
       "membershipStartDate",
@@ -167,7 +192,7 @@ export class PaymentRepository {
           TableName: this.table,
         },
       },
-      {
+      ...(correction === undefined ? [{
         ConditionCheck: {
           ConditionExpression:
             "attribute_exists(#pk) AND #entityType = :membership AND #membershipId = :membershipId",
@@ -187,12 +212,21 @@ export class PaymentRepository {
           ),
           TableName: this.table,
         },
-      },
+      }] : []),
+      ...(correction === undefined ? [] : [{
+        ConditionCheck: {
+          ConditionExpression: "#status = :confirmed AND #version = :expectedVersion",
+          ExpressionAttributeNames: { "#status": "status", "#version": "version" },
+          ExpressionAttributeValues: { ":confirmed": "CONFIRMED", ":expectedVersion": correction.expectedOriginalVersion },
+          Key: primaryKeys.payment(payment.userId, correction.originalPaidAt, correction.originalPaymentId),
+          TableName: this.table,
+        },
+      }]),
       putAbsent(this.table, this.toItem(payment, key)),
       putAbsent(this.table, this.dateView(payment, key)),
       putAbsent(this.table, this.statusView(payment, key)),
       new AuditLogRepository(this.document, this.table).createAppendAction({
-        action: "PAYMENT_RECORDED",
+        action: correction === undefined ? "PAYMENT_RECORDED" : `PAYMENT_${correction.type}`,
         actorId: payment.recordedBy,
         auditId: financialId(input.auditId, "auditId"),
         correlationId: financialId(input.correlationId, "correlationId"),
@@ -200,6 +234,7 @@ export class PaymentRepository {
           amount: payment.amount,
           currency: payment.currency,
           method: payment.method,
+          ...(correction === undefined ? {} : { correctionType: correction.type, originalPaymentId: correction.originalPaymentId }),
           status: payment.status,
         },
         result: "SUCCEEDED",
@@ -207,12 +242,27 @@ export class PaymentRepository {
         targetType: "Payment",
         timestamp: payment.createdAt,
       }).action,
+      ...(correction === undefined ? [] : [putAbsent(this.table, {
+        ...primaryKeys.paymentCorrection(payment.userId, payment.paidAt, payment.id),
+        actorId: payment.recordedBy,
+        correctedAt: payment.paidAt,
+        correctionId: payment.id,
+        createdAt: payment.createdAt,
+        entityType: "PaymentCorrection",
+        originalPaymentId: correction.originalPaymentId,
+        reason: correction.reason,
+        relatedPaymentId: payment.id,
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        type: correction.type,
+        updatedAt: payment.updatedAt,
+        userId: payment.userId,
+      })]),
     ];
     const result = await this.transactPayment(
       {
         createdAt: payment.createdAt,
         operation: "PAYMENT_RECORD",
-        payload: this.recordPayload(payment, membershipStartDate),
+        payload: this.recordPayload(payment, membershipStartDate, correction),
         requestKey: financialId(input.requestKey, "requestKey"),
         result: { paidAt: payment.paidAt, paymentId: payment.id, userId: payment.userId },
         retention: { kind: "DURABLE" },
@@ -220,14 +270,15 @@ export class PaymentRepository {
       },
       actions,
     );
-    const persisted = await this.getById(payment.userId, payment.paidAt, payment.id);
+    const reference = this.paymentResult(result.result);
+    const persisted = await this.getById(reference.userId, reference.paidAt, reference.paymentId);
     if (persisted === undefined) {
       throw paymentError(
         "PAYMENT_RECORD_INVALID",
         "El pago idempotente no tiene un registro canónico.",
       );
     }
-    return { disposition: result, value: persisted };
+    return { disposition: result.disposition, value: persisted };
   }
 
   async voidConfirmed(
@@ -323,6 +374,17 @@ export class PaymentRepository {
         updatedAt: correction.correctedAt,
         userId: correction.userId,
       }),
+      new AuditLogRepository(this.document, this.table).createAppendAction({
+        action: "PAYMENT_VOIDED",
+        actorId: correction.actorId,
+        auditId: financialId(input.auditId, "auditId"),
+        correlationId: financialId(input.correlationId, "correlationId"),
+        details: { originalPaymentId: paymentId, reason: correction.reason },
+        result: "SUCCEEDED",
+        targetId: paymentId,
+        targetType: "Payment",
+        timestamp: correctedAt,
+      }).action,
     ];
     const disposition = await this.transactPayment(
       {
@@ -330,8 +392,6 @@ export class PaymentRepository {
         operation: "PAYMENT_VOID",
         payload: {
           actorId: correction.actorId,
-          correctedAt,
-          correctionId: correction.id,
           expectedVersion: input.expectedVersion,
           originalPaidAt: paidAt,
           paymentId,
@@ -346,11 +406,13 @@ export class PaymentRepository {
           userId,
         },
         retention: { kind: "DURABLE" },
-        subjectId: userId,
+        subjectId: correction.actorId,
       },
       actions,
     );
-    const persisted = await this.base.get(correctionKey, true);
+    const reference = this.correctionResult(disposition.result);
+    const persistedKey = primaryKeys.paymentCorrection(reference.userId, reference.correctedAt, reference.correctionId);
+    const persisted = await this.base.get(persistedKey, true);
     if (persisted === undefined) {
       throw paymentError(
         "PAYMENT_RECORD_INVALID",
@@ -358,8 +420,8 @@ export class PaymentRepository {
       );
     }
     return {
-      disposition,
-      value: this.readCorrection(persisted, correctionKey),
+      disposition: disposition.disposition,
+      value: this.readCorrection(persisted, persistedKey),
     };
   }
 
@@ -464,9 +526,9 @@ export class PaymentRepository {
   private async transactPayment(
     input: Parameters<IdempotencyRepository["transactOrReplay"]>[0],
     actions: readonly TransactionAction[],
-  ): Promise<"CREATED" | "REPLAYED"> {
+  ): Promise<IdempotencyResult> {
     try {
-      return (await this.idempotency.transactOrReplay(input, actions)).disposition;
+      return await this.idempotency.transactOrReplay(input, actions);
     } catch (error) {
       const mapped = mapDynamoDbError(error);
       if (
@@ -656,6 +718,8 @@ export class PaymentRepository {
       typeof item.updatedAt !== "string" ||
       (item.notes !== undefined && typeof item.notes !== "string") ||
       (item.receiptKey !== undefined && typeof item.receiptKey !== "string") ||
+      (item.correctionType !== undefined && item.correctionType !== "ADJUSTMENT" && item.correctionType !== "COMPENSATION") ||
+      (item.originalPaymentId !== undefined && typeof item.originalPaymentId !== "string") ||
       !isPaymentStatus(item.status) ||
       !isPaymentMethod(item.method) ||
       amount === undefined ||
@@ -664,7 +728,7 @@ export class PaymentRepository {
       throw paymentError("PAYMENT_RECORD_INVALID", "El pago persistido no es válido.");
     }
     try {
-      return this.validatePayment({
+      const payment = this.validatePayment({
         amount,
         createdAt: item.createdAt,
         currency: item.currency,
@@ -683,6 +747,11 @@ export class PaymentRepository {
         status: item.status === "VOIDED" ? "CONFIRMED" : item.status,
         userId: item.userId,
       }, version, item.updatedAt, item.status);
+      return {
+        ...payment,
+        ...(item.correctionType === undefined ? {} : { correctionType: item.correctionType }),
+        ...(item.originalPaymentId === undefined ? {} : { originalPaymentId: financialId(item.originalPaymentId, "originalPaymentId") }),
+      };
     } catch {
       throw paymentError("PAYMENT_RECORD_INVALID", "El pago persistido no es válido.");
     }
@@ -697,7 +766,7 @@ export class PaymentRepository {
       item.SK !== expectedKey.SK ||
       item.entityType !== "PaymentCorrection" ||
       readFiniteNumber(item.schemaVersion) !== CURRENT_SCHEMA_VERSION ||
-      item.type !== "VOID" ||
+      (item.type !== "VOID" && item.type !== "ADJUSTMENT" && item.type !== "COMPENSATION") ||
       typeof item.actorId !== "string" ||
       typeof item.correctedAt !== "string" ||
       typeof item.correctionId !== "string" ||
@@ -717,7 +786,8 @@ export class PaymentRepository {
       id: financialId(item.correctionId, "correctionId"),
       originalPaymentId: financialId(item.originalPaymentId, "originalPaymentId"),
       reason: financialText(item.reason, "reason", 500),
-      type: "VOID",
+      ...(item.relatedPaymentId === undefined ? {} : { relatedPaymentId: financialId(item.relatedPaymentId, "relatedPaymentId") }),
+      type: item.type,
       userId: financialId(item.userId, "userId"),
     };
   }
@@ -726,6 +796,7 @@ export class PaymentRepository {
     return {
       ...key,
       amount: payment.amount,
+      ...(payment.correctionType === undefined ? {} : { correctionType: payment.correctionType }),
       createdAt: payment.createdAt,
       currency: payment.currency,
       entityType: "Payment",
@@ -733,6 +804,7 @@ export class PaymentRepository {
       method: payment.method,
       ...(payment.notes === undefined ? {} : { notes: payment.notes }),
       paidAt: payment.paidAt,
+      ...(payment.originalPaymentId === undefined ? {} : { originalPaymentId: payment.originalPaymentId }),
       paymentDate: payment.paymentDate,
       paymentId: payment.id,
       periodEnd: payment.periodEnd,
@@ -750,19 +822,25 @@ export class PaymentRepository {
   private recordPayload(
     payment: Payment,
     membershipStartDate: string,
+    correction?: RecordPaymentInput["correction"],
   ): JsonValue {
     return {
       amount: payment.amount,
       currency: payment.currency,
+      ...(payment.correctionType === undefined ? {} : { correctionType: payment.correctionType }),
       membershipId: payment.membershipId,
       membershipStartDate,
       method: payment.method,
       ...(payment.notes === undefined ? {} : { notes: payment.notes }),
-      paidAt: payment.paidAt,
-      paymentDate: payment.paymentDate,
+      ...(correction === undefined ? { paidAt: payment.paidAt, paymentDate: payment.paymentDate } : {
+        expectedOriginalVersion: correction.expectedOriginalVersion,
+        originalPaidAt: correction.originalPaidAt,
+        reason: correction.reason,
+      }),
       paymentId: payment.id,
       periodEnd: payment.periodEnd,
       periodStart: payment.periodStart,
+      ...(payment.originalPaymentId === undefined ? {} : { originalPaymentId: payment.originalPaymentId }),
       ...(payment.receiptKey === undefined ? {} : { receiptKey: payment.receiptKey }),
       recordedBy: payment.recordedBy,
       status: payment.status,
@@ -821,5 +899,19 @@ export class PaymentRepository {
       userId: financialId(input.userId, "userId"),
       version,
     };
+  }
+
+  private paymentResult(value: JsonValue): { readonly paidAt: string; readonly paymentId: string; readonly userId: string } {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw paymentError("PAYMENT_RECORD_INVALID", "El resultado idempotente no es válido.");
+    const record = value as Readonly<Record<string, JsonValue>>;
+    if (typeof record.paidAt !== "string" || typeof record.paymentId !== "string" || typeof record.userId !== "string") throw paymentError("PAYMENT_RECORD_INVALID", "El resultado idempotente no es válido.");
+    return { paidAt: financialTimestamp(record.paidAt, "paidAt"), paymentId: financialId(record.paymentId, "paymentId"), userId: financialId(record.userId, "userId") };
+  }
+
+  private correctionResult(value: JsonValue): { readonly correctedAt: string; readonly correctionId: string; readonly userId: string } {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw paymentError("PAYMENT_RECORD_INVALID", "El resultado idempotente no es válido.");
+    const record = value as Readonly<Record<string, JsonValue>>;
+    if (typeof record.correctedAt !== "string" || typeof record.correctionId !== "string" || typeof record.userId !== "string") throw paymentError("PAYMENT_RECORD_INVALID", "El resultado idempotente no es válido.");
+    return { correctedAt: financialTimestamp(record.correctedAt, "correctedAt"), correctionId: financialId(record.correctionId, "correctionId"), userId: financialId(record.userId, "userId") };
   }
 }

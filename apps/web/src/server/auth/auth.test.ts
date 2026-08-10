@@ -288,6 +288,10 @@ describe("OAuth session service", () => {
           userId: input.userId, version: 1,
         } satisfies Payment,
       })),
+      voidConfirmed: vi.fn(async (input) => ({
+        disposition: "CREATED" as const,
+        value: { actorId: input.actorId, correctedAt: input.correctedAt, id: input.correctionId, originalPaymentId: input.paymentId, reason: input.reason, type: "VOID" as const, userId: input.userId },
+      })),
     };
     const receiptPort: ReceiptUploadPort = {
       issue: vi.fn(async () => ({ headers: { "content-type": "application/pdf" }, key: "payment-receipts/test.pdf", uploadUrl: "/signed-upload" })),
@@ -1040,6 +1044,21 @@ describe("OAuth session service", () => {
     completed.set(actor.userId, { ...completed.get(actor.userId)!, roles: ["STUDENT"] });
     await expect(service.recordAdminPayment(request(), "correlation-3", command))
       .rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+  });
+
+  it("allows only active ADMIN to create linked, idempotent payment corrections", async () => {
+    const { completed, paymentPort, paymentRecords, service, userPort } = setup();
+    const actor = { ...identity, createdAt: "2026-08-08T12:00:00Z", userId: "admin-correction" };
+    await userPort.createPending(actor);
+    completed.set(actor.userId, { createdAt: actor.createdAt, displayName: "Admin", email: actor.email, emailVerified: true, id: actor.userId, roles: ["ADMIN"], status: "ACTIVE", updatedAt: actor.createdAt, version: 2 });
+    paymentRecords.push({ amount: 100_000, createdAt: actor.createdAt, currency: "PYG", id: "payment-original", membershipId: "membership-1", method: "CASH", paidAt: "2026-08-08T13:00:00.000Z", paymentDate: "2026-08-08", periodEnd: "2026-08-31", periodStart: "2026-08-01", recordedBy: "staff", status: "CONFIRMED", updatedAt: actor.createdAt, userId: "student-1", version: 1 });
+    const request = () => new Request("https://app.example.com/api/v1/admin/payments/payment-original/corrections", { headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token`, "idempotency-key": "correction-request-001", origin: config.appBaseUrl }, method: "POST" });
+    const base = { expectedVersion: 1, originalPaidAt: "2026-08-08T13:00:00.000Z", originalPaymentId: "payment-original", reason: "Error administrativo documentado", userId: "student-1" };
+    await expect(service.correctAdminPayment(request(), "correlation-1", { ...base, type: "VOID" })).resolves.toMatchObject({ value: { type: "VOID" } });
+    await expect(service.correctAdminPayment(request(), "correlation-2", { ...base, amount: 10_000, type: "ADJUSTMENT" })).resolves.toMatchObject({ value: { amount: 10_000 } });
+    expect(paymentPort.record).toHaveBeenLastCalledWith(expect.objectContaining({ correction: expect.objectContaining({ originalPaymentId: "payment-original", type: "ADJUSTMENT" }) }));
+    completed.set(actor.userId, { ...completed.get(actor.userId)!, roles: ["STAFF"] });
+    await expect(service.correctAdminPayment(request(), "correlation-3", { ...base, type: "VOID" })).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
   });
 
   it("scopes payment history and receipt access to the authenticated student", async () => {

@@ -14,6 +14,7 @@ import {
   type PaymentPage,
   type PaymentMutationResult,
   type RecordPaymentInput,
+  type VoidPaymentInput,
   type TransitionUserStatusInput,
   type UpdateMembershipPlanInput,
   type UpdateMembershipInput,
@@ -30,6 +31,7 @@ import {
   type MembershipPlan,
   type MembershipStanding,
   type Payment,
+  type PaymentCorrection,
   type PaymentStatus,
   type UserProfile,
   type UserStatus,
@@ -37,6 +39,7 @@ import {
 import type {
   AdminStudentQuery,
   AdminPaymentQuery,
+  CorrectPaymentCommand,
   CreateMembershipCommand,
   CompleteProfileInput,
   MembershipPlanCommand,
@@ -118,6 +121,7 @@ export interface PaymentPort {
   listByStatus(status: PaymentStatus, options?: { readonly cursors?: MembershipFanOutCursors; readonly limitPerShard?: number }): Promise<PaymentPage>;
   listHistory(userId: string, options?: { readonly consistentRead?: boolean; readonly cursor?: DynamoDbKey; readonly limit?: number }): Promise<{ readonly cursor?: DynamoDbKey; readonly payments: readonly Payment[] }>;
   record(input: RecordPaymentInput): Promise<PaymentMutationResult<Payment>>;
+  voidConfirmed(input: VoidPaymentInput): Promise<PaymentMutationResult<PaymentCorrection>>;
 }
 
 export interface OnboardingProfile {
@@ -194,7 +198,11 @@ export interface AdminMembershipReportPage {
 }
 
 export type PaymentView = Omit<Payment, "receiptKey"> & { readonly hasReceipt: boolean };
-export interface PaymentQueryPage { readonly cursor?: string; readonly payments: readonly PaymentView[] }
+export interface PaymentQueryPage {
+  readonly capabilities?: { readonly canCorrect: boolean };
+  readonly cursor?: string;
+  readonly payments: readonly PaymentView[];
+}
 
 export interface AuthServiceDependencies {
   readonly clock?: () => Date;
@@ -1103,6 +1111,86 @@ export class AuthService {
     }
   }
 
+  async correctAdminPayment(
+    request: Request,
+    correlationId: string,
+    input: CorrectPaymentCommand,
+  ): Promise<PaymentMutationResult<Payment | PaymentCorrection>> {
+    this.assertSameOrigin(request);
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "payment-correct"), 10);
+    const requestKey = request.headers.get("idempotency-key");
+    if (requestKey === null || !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u.test(requestKey)) {
+      throw new ApiError(422, apiErrorCodes.validationError, "La clave de idempotencia no es válida.");
+    }
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("PAYMENT_CORRECT");
+      const original = await this.paymentRepository().getById(input.userId, input.originalPaidAt, input.originalPaymentId);
+      if (original === undefined) throw new ApiError(404, apiErrorCodes.notFound, "No se encontró el pago original.");
+      const isVoidReplay = input.type === "VOID" && original.status === "VOIDED" && original.version === input.expectedVersion + 1;
+      if (!isVoidReplay && (original.status !== "CONFIRMED" || original.version !== input.expectedVersion)) {
+        throw new ApiError(409, apiErrorCodes.conflict, "El pago original cambió o ya no está confirmado.");
+      }
+      const operationHash = createHash("sha256").update(`${principal.id}\0${requestKey}`, "utf8").digest("hex").slice(0, 32);
+      const now = this.clock().toISOString();
+      if (input.type === "VOID") {
+        return await this.paymentRepository().voidConfirmed({
+          actorId: principal.id,
+          auditId: `audit-${operationHash}`,
+          correctedAt: now,
+          correctionId: `correction-${operationHash}`,
+          correlationId,
+          expectedVersion: input.expectedVersion,
+          originalPaidAt: input.originalPaidAt,
+          paymentId: input.originalPaymentId,
+          reason: input.reason,
+          requestKey,
+          userId: input.userId,
+        });
+      }
+      if (input.amount === undefined) {
+        throw new ApiError(422, apiErrorCodes.validationError, "El importe de la corrección es obligatorio.");
+      }
+      return await this.paymentRepository().record({
+        amount: input.amount,
+        auditId: `audit-${operationHash}`,
+        correlationId,
+        correction: {
+          expectedOriginalVersion: input.expectedVersion,
+          originalPaidAt: input.originalPaidAt,
+          originalPaymentId: input.originalPaymentId,
+          reason: input.reason,
+          type: input.type,
+        },
+        createdAt: now,
+        currency: original.currency,
+        membershipId: original.membershipId,
+        membershipStartDate: original.periodStart,
+        method: "OTHER",
+        notes: input.reason,
+        paidAt: now,
+        paymentDate: localCalendarDate(new Date(now)),
+        paymentId: `payment-${operationHash}`,
+        periodEnd: original.periodEnd,
+        periodStart: original.periodStart,
+        recordedBy: principal.id,
+        requestKey,
+        status: "CONFIRMED",
+        userId: original.userId,
+      });
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      if (error instanceof DynamoDbRepositoryError && (error.code === "IDEMPOTENCY_CONFLICT" || error.code === "PAYMENT_CONFLICT")) {
+        throw new ApiError(409, apiErrorCodes.conflict, "La corrección ya existe con otros datos o el pago cambió.");
+      }
+      if (error instanceof DynamoDbRepositoryError && error.code === "INVALID_INPUT") {
+        throw new ApiError(422, apiErrorCodes.validationError, "Los datos de corrección no son válidos.");
+      }
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible corregir el pago.");
+    }
+  }
+
   async getOwnPayments(request: Request, query: OwnPaymentQuery): Promise<PaymentQueryPage> {
     const principal = await this.authenticate(request);
     this.assertRateLimit(principalRateKey(principal.id, "own-payment-read"), 60);
@@ -1135,7 +1223,11 @@ export class AuthService {
         ? await this.paymentRepository().listByDate(query.value, { ...(cursors === undefined ? {} : { cursors }), limitPerShard: 10 })
         : await this.paymentRepository().listByStatus(this.paymentStatus(query.value), { ...(cursors === undefined ? {} : { cursors }), limitPerShard: 10 });
       const cursor = encodePaymentQueryCursor(query, page.cursors);
-      return { ...(cursor === undefined ? {} : { cursor }), payments: page.payments.map(paymentView) };
+      return {
+        capabilities: { canCorrect: principal.roles.includes("ADMIN") },
+        ...(cursor === undefined ? {} : { cursor }),
+        payments: page.payments.map(paymentView),
+      };
     } catch (error) {
       this.rethrowAuthorization(error);
       if (error instanceof ApiError) throw error;

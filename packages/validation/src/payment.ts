@@ -33,6 +33,15 @@ export interface PaymentReceiptQuery {
   readonly paidAt: string;
   readonly paymentId: string;
 }
+export interface CorrectPaymentCommand {
+  readonly amount?: number;
+  readonly expectedVersion: number;
+  readonly originalPaidAt: string;
+  readonly originalPaymentId: string;
+  readonly reason: string;
+  readonly type: "ADJUSTMENT" | "COMPENSATION" | "VOID";
+  readonly userId: string;
+}
 
 const issue = (path: string, message: string): ValidationIssue => ({
   code: "INVALID_PAYMENT_FIELD",
@@ -91,6 +100,27 @@ export const validatePaymentReceiptQuery = (params: URLSearchParams): Validation
   if (paidAt === undefined) issues.push(issue("paidAt", "La fecha del pago no es válida."));
   if (paymentId === undefined) issues.push(issue("paymentId", "El pago no es válido."));
   return result(issues, { paidAt: paidAt ?? "", paymentId: paymentId ?? "" });
+};
+
+export const validateCorrectPayment = (value: unknown): ValidationResult<CorrectPaymentCommand> => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return { issues: [issue("$", "El contenido debe ser un objeto.")], success: false };
+  const record = value as Record<string, unknown>;
+  const allowed = new Set(["amount", "expectedVersion", "originalPaidAt", "originalPaymentId", "reason", "type", "userId"]);
+  const issues: ValidationIssue[] = Object.keys(record).some((key) => !allowed.has(key)) ? [issue("$", "El contenido incluye campos no permitidos.")] : [];
+  const type = record.type === "VOID" || record.type === "ADJUSTMENT" || record.type === "COMPENSATION" ? record.type : undefined;
+  const amount = typeof record.amount === "number" && Number.isSafeInteger(record.amount) && record.amount > 0 ? record.amount : undefined;
+  const expectedVersion = typeof record.expectedVersion === "number" && Number.isSafeInteger(record.expectedVersion) && record.expectedVersion > 0 ? record.expectedVersion : undefined;
+  const originalPaidAt = timestamp(record.originalPaidAt);
+  const originalPaymentId = id(record.originalPaymentId);
+  const userId = id(record.userId);
+  const reason = text(record.reason, 500);
+  if (type === undefined) issues.push(issue("type", "El tipo de corrección no es válido."));
+  if (type !== "VOID" && amount === undefined) issues.push(issue("amount", "El ajuste requiere un importe entero positivo."));
+  if (type === "VOID" && record.amount !== undefined) issues.push(issue("amount", "La anulación no admite importe."));
+  if (expectedVersion === undefined) issues.push(issue("expectedVersion", "La versión no es válida."));
+  if (originalPaidAt === undefined || originalPaymentId === undefined || userId === undefined) issues.push(issue("originalPaymentId", "El pago original no es válido."));
+  if (reason === undefined || reason.length < 5) issues.push(issue("reason", "El motivo debe tener entre 5 y 500 caracteres."));
+  return result(issues, { ...(amount === undefined ? {} : { amount }), expectedVersion: expectedVersion ?? 0, originalPaidAt: originalPaidAt ?? "", originalPaymentId: originalPaymentId ?? "", reason: reason ?? "", type: type ?? "VOID", userId: userId ?? "" });
 };
 
 export const validateRecordPayment = (value: unknown): ValidationResult<RecordPaymentCommand> => {
