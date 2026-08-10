@@ -35,7 +35,7 @@ import {
   type JsonValue,
   type TransactionAction,
 } from "./idempotency-repository";
-import type { FinancialFanOutCursors } from "./membership-repository";
+import type { MembershipFanOutCursors } from "./membership-repository";
 import { operationalIndexKeys, primaryKeys } from "./model-keys";
 import { SHARDS, shardForId, type Shard } from "./model-shards";
 import { CURRENT_SCHEMA_VERSION, type PrimaryKey } from "./model-types";
@@ -80,7 +80,7 @@ export interface PaymentMutationResult<T> {
 }
 
 export interface PaymentPage {
-  readonly cursors?: FinancialFanOutCursors;
+  readonly cursors?: MembershipFanOutCursors;
   readonly payments: readonly Payment[];
 }
 
@@ -135,9 +135,6 @@ const putAbsent = (table: string, item: DynamoDbItem): TransactionAction => ({
     TableName: table,
   },
 });
-
-const hasCursors = (cursors: FinancialFanOutCursors): boolean =>
-  Object.values(cursors).some((cursor) => cursor !== undefined);
 
 export class PaymentRepository {
   private readonly base: BaseDynamoDbRepository;
@@ -423,7 +420,7 @@ export class PaymentRepository {
 
   async listByDate(
     date: string,
-    options: { readonly cursors?: FinancialFanOutCursors; readonly limitPerShard?: number } = {},
+    options: { readonly cursors?: MembershipFanOutCursors; readonly limitPerShard?: number } = {},
   ): Promise<PaymentPage> {
     const paymentDate = financialDate(date, "paymentDate");
     return this.listFromViews(
@@ -437,7 +434,7 @@ export class PaymentRepository {
   async listByStatus(
     status: PaymentStatus,
     options: {
-      readonly cursors?: FinancialFanOutCursors;
+      readonly cursors?: MembershipFanOutCursors;
       readonly from?: string;
       readonly limitPerShard?: number;
       readonly to?: string;
@@ -566,7 +563,7 @@ export class PaymentRepository {
   private async listFromViews(
     partition: (shard: Shard) => string,
     purpose: "DATE" | "STATUS",
-    options: { readonly cursors?: FinancialFanOutCursors; readonly limitPerShard?: number },
+    options: { readonly cursors?: MembershipFanOutCursors; readonly limitPerShard?: number },
     matches: (payment: Payment) => boolean,
     range?: { readonly from: string; readonly to: string },
   ): Promise<PaymentPage> {
@@ -574,21 +571,24 @@ export class PaymentRepository {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 25) {
       throw invalidDynamoDbInput("El límite por shard debe estar entre 1 y 25.");
     }
+    if (options.cursors !== undefined && (
+      Object.keys(options.cursors).length !== SHARDS.length || SHARDS.some((shard) => !(shard in options.cursors!))
+    )) throw invalidDynamoDbInput("El cursor de pagos está incompleto.");
     const pages = await Promise.all(
-      SHARDS.map(async (shard) => ({
+      SHARDS.map(async (shard) => {
+        const cursor = options.cursors?.[shard];
+        if (cursor === null) return { page: { items: [] as readonly DynamoDbItem[] }, shard };
+        return {
         page: await this.base.queryPage({
-          ...(options.cursors?.[shard] === undefined
-            ? {}
-            : { cursor: options.cursors[shard] }),
+          ...(cursor === undefined ? {} : { cursor }),
           indexName: "GSI1-Operational",
           limit,
           partitionValue: partition(shard),
           ...(range === undefined
             ? {}
             : { sortKey: { ...range, operation: "BETWEEN" as const } }),
-        }),
-        shard,
-      })),
+        }), shard };
+      }),
     );
     const viewKeys = pages.flatMap(({ page }) => page.items.map(itemKey));
     const canonicalKeys = viewKeys.length === 0
@@ -604,11 +604,10 @@ export class PaymentRepository {
           .sort((left, right) =>
             left.paidAt.localeCompare(right.paidAt) || left.id.localeCompare(right.id)
           );
-    const cursors = Object.fromEntries(
-      pages.map(({ page, shard }) => [shard, page.nextCursor]),
-    );
+    const hasNextPage = pages.some(({ page }) => page.nextCursor !== undefined);
+    const cursors = Object.fromEntries(pages.map(({ page, shard }) => [shard, page.nextCursor ?? null]));
     return {
-      ...(hasCursors(cursors) ? { cursors } : {}),
+      ...(hasNextPage ? { cursors } : {}),
       payments,
     };
   }

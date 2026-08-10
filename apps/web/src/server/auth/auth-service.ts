@@ -11,6 +11,7 @@ import {
   type MembershipPlanCursors,
   type MembershipPlanPage,
   type MembershipPage,
+  type PaymentPage,
   type PaymentMutationResult,
   type RecordPaymentInput,
   type TransitionUserStatusInput,
@@ -29,11 +30,13 @@ import {
   type MembershipPlan,
   type MembershipStanding,
   type Payment,
+  type PaymentStatus,
   type UserProfile,
   type UserStatus,
 } from "@gym-adr/domain";
 import type {
   AdminStudentQuery,
+  AdminPaymentQuery,
   CreateMembershipCommand,
   CompleteProfileInput,
   MembershipPlanCommand,
@@ -41,6 +44,8 @@ import type {
   MembershipHistoryQuery,
   MembershipReportQuery,
   OwnMembershipQuery,
+  OwnPaymentQuery,
+  PaymentReceiptQuery,
   PaymentReceiptUploadCommand,
   RecordPaymentCommand,
   TransitionStudentStatusInput,
@@ -108,6 +113,10 @@ export interface MembershipPort {
 }
 
 export interface PaymentPort {
+  getById(userId: string, paidAt: string, paymentId: string): Promise<Payment | undefined>;
+  listByDate(date: string, options?: { readonly cursors?: MembershipFanOutCursors; readonly limitPerShard?: number }): Promise<PaymentPage>;
+  listByStatus(status: PaymentStatus, options?: { readonly cursors?: MembershipFanOutCursors; readonly limitPerShard?: number }): Promise<PaymentPage>;
+  listHistory(userId: string, options?: { readonly consistentRead?: boolean; readonly cursor?: DynamoDbKey; readonly limit?: number }): Promise<{ readonly cursor?: DynamoDbKey; readonly payments: readonly Payment[] }>;
   record(input: RecordPaymentInput): Promise<PaymentMutationResult<Payment>>;
 }
 
@@ -183,6 +192,9 @@ export interface AdminMembershipReportPage {
   readonly cursor?: string;
   readonly memberships: readonly AdminMembershipView[];
 }
+
+export type PaymentView = Omit<Payment, "receiptKey"> & { readonly hasReceipt: boolean };
+export interface PaymentQueryPage { readonly cursor?: string; readonly payments: readonly PaymentView[] }
 
 export interface AuthServiceDependencies {
   readonly clock?: () => Date;
@@ -392,6 +404,53 @@ const encodeMembershipReportCursor = (
 ): string | undefined => cursors === undefined
   ? undefined
   : Buffer.from(JSON.stringify({ cursors, query: membershipReportIdentity(query) }), "utf8").toString("base64url");
+
+const paymentView = (payment: Payment): PaymentView => {
+  const { receiptKey, ...safe } = payment;
+  return { ...safe, hasReceipt: receiptKey !== undefined };
+};
+const decodeOwnPaymentCursor = (cursor: string | undefined, owner: string): DynamoDbKey | undefined => {
+  if (cursor === undefined) return undefined;
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error();
+    const record = value as Record<string, unknown>;
+    if (record.owner !== owner || !isCursorKey(record.cursor)) throw new Error();
+    const key = record.cursor;
+    if (Object.keys(key).length !== 2 || key.PK !== `USER#${owner}` || !key.SK?.startsWith("PAYMENT#")) throw new Error();
+    return key;
+  } catch { throw new ApiError(422, apiErrorCodes.validationError, "El cursor de pagos no es válido."); }
+};
+const encodeOwnPaymentCursor = (cursor: DynamoDbKey | undefined, owner: string): string | undefined => cursor === undefined
+  ? undefined
+  : Buffer.from(JSON.stringify({ cursor, owner }), "utf8").toString("base64url");
+const paymentQueryIdentity = (query: AdminPaymentQuery): string => `${query.filter}:${query.value}`;
+const decodePaymentQueryCursor = (cursor: string | undefined, query: AdminPaymentQuery): MembershipFanOutCursors | undefined => {
+  if (cursor === undefined) return undefined;
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error();
+    const record = value as Record<string, unknown>;
+    if (record.query !== paymentQueryIdentity(query) || typeof record.cursors !== "object" || record.cursors === null || Array.isArray(record.cursors)) throw new Error();
+    const raw = record.cursors as Record<string, unknown>;
+    const shards = ["S00", "S01", "S02", "S03"];
+    if (Object.keys(raw).length !== shards.length || shards.some((shard) => !(shard in raw))) throw new Error();
+    const cursors: Record<string, DynamoDbKey | null> = {};
+    for (const shard of shards) {
+      const item = raw[shard];
+      if (item === null) { cursors[shard] = null; continue; }
+      if (!isCursorKey(item) || Object.keys(item).length !== 4) throw new Error();
+      const purpose = query.filter === "date" ? "DATE" : `STATUS_${query.value}`;
+      const partition = query.filter === "date" ? `PAYMENT_DATE#${query.value}#${shard}` : `PAYMENT_STATUS#${query.value}#${shard}`;
+      if (!item.PK?.startsWith("VIEW#Payment#") || !item.SK?.startsWith(`VIEW#${purpose}#`) || item.GSI1PK !== partition || !item.GSI1SK?.startsWith("AT#")) throw new Error();
+      cursors[shard] = item;
+    }
+    return cursors;
+  } catch { throw new ApiError(422, apiErrorCodes.validationError, "El cursor de pagos no es válido."); }
+};
+const encodePaymentQueryCursor = (query: AdminPaymentQuery, cursors: PaymentPage["cursors"]): string | undefined => cursors === undefined
+  ? undefined
+  : Buffer.from(JSON.stringify({ cursors, query: paymentQueryIdentity(query) }), "utf8").toString("base64url");
 
 export class AuthService {
   private readonly clock: () => Date;
@@ -1044,6 +1103,67 @@ export class AuthService {
     }
   }
 
+  async getOwnPayments(request: Request, query: OwnPaymentQuery): Promise<PaymentQueryPage> {
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "own-payment-read"), 60);
+    try {
+      const scope = new AuthorizedRepositoryScope(principalFromProfile(principal));
+      return await scope.listOwn("PAYMENT_READ_OWN", async (userId) => {
+        const decodedCursor = decodeOwnPaymentCursor(query.cursor, userId);
+        const page = await this.paymentRepository().listHistory(userId, {
+          consistentRead: true,
+          ...(decodedCursor === undefined ? {} : { cursor: decodedCursor }),
+          limit: 20,
+        });
+        const cursor = encodeOwnPaymentCursor(page.cursor, userId);
+        return { ...(cursor === undefined ? {} : { cursor }), payments: page.payments.map(paymentView) };
+      });
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible consultar tus pagos.");
+    }
+  }
+
+  async listAdminPayments(request: Request, query: AdminPaymentQuery): Promise<PaymentQueryPage> {
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "payment-report"), 30);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("PAYMENT_READ_ALL");
+      const cursors = decodePaymentQueryCursor(query.cursor, query);
+      const page = query.filter === "date"
+        ? await this.paymentRepository().listByDate(query.value, { ...(cursors === undefined ? {} : { cursors }), limitPerShard: 10 })
+        : await this.paymentRepository().listByStatus(this.paymentStatus(query.value), { ...(cursors === undefined ? {} : { cursors }), limitPerShard: 10 });
+      const cursor = encodePaymentQueryCursor(query, page.cursors);
+      return { ...(cursor === undefined ? {} : { cursor }), payments: page.payments.map(paymentView) };
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible consultar los pagos.");
+    }
+  }
+
+  async getOwnPaymentReceipt(request: Request, query: PaymentReceiptQuery): Promise<{ readonly url: string }> {
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "payment-receipt-read"), 30);
+    try {
+      const userId = new AuthorizedRepositoryScope(principalFromProfile(principal)).ownUserId("PAYMENT_READ_OWN");
+      const payment = await this.paymentRepository().getById(userId, query.paidAt, query.paymentId);
+      if (payment?.receiptKey === undefined) throw new ApiError(404, apiErrorCodes.notFound, "No se encontró el comprobante solicitado.");
+      return { url: await this.receiptUploader().issueDownload(payment.receiptKey) };
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible abrir el comprobante.");
+    }
+  }
+
+  async consumeLocalPaymentReceiptDownload(token: string): Promise<Response> {
+    const consume = this.receiptUploader().consumeLocalDownload;
+    if (consume === undefined) throw new ApiError(404, apiErrorCodes.notFound, "La descarga local no está disponible.");
+    return consume.call(this.receiptUploader(), token);
+  }
+
   logout(request: Request): Response {
     this.assertSameOrigin(request);
     this.assertRateLimit(requestRateKey(request, "logout"), 20);
@@ -1134,6 +1254,11 @@ export class AuthService {
       throw new ApiError(422, apiErrorCodes.validationError, "El estado de membresía no es válido.");
     }
     return status;
+  }
+
+  private paymentStatus(value: string): PaymentStatus {
+    if (value === "PENDING" || value === "CONFIRMED" || value === "VOIDED") return value;
+    throw new ApiError(422, apiErrorCodes.validationError, "El estado de pago no es válido.");
   }
 
   private rethrowMembershipPersistence(error: unknown, operation: string): never {

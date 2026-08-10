@@ -270,7 +270,12 @@ describe("OAuth session service", () => {
         return membership;
       }),
     };
+    const paymentRecords: Payment[] = [];
     const paymentPort: PaymentPort = {
+      getById: vi.fn(async (userId, paidAt, paymentId) => paymentRecords.find((payment) => payment.userId === userId && payment.paidAt === paidAt && payment.id === paymentId)),
+      listByDate: vi.fn(async (date) => ({ payments: paymentRecords.filter((payment) => payment.paymentDate === date) })),
+      listByStatus: vi.fn(async (status) => ({ payments: paymentRecords.filter((payment) => payment.status === status) })),
+      listHistory: vi.fn(async (userId) => ({ payments: paymentRecords.filter((payment) => payment.userId === userId) })),
       record: vi.fn(async (input) => ({
         disposition: "CREATED" as const,
         value: {
@@ -286,6 +291,7 @@ describe("OAuth session service", () => {
     };
     const receiptPort: ReceiptUploadPort = {
       issue: vi.fn(async () => ({ headers: { "content-type": "application/pdf" }, key: "payment-receipts/test.pdf", uploadUrl: "/signed-upload" })),
+      issueDownload: vi.fn(async () => "/signed-download"),
     };
     let sequence = 0;
     const service = new AuthService({
@@ -300,7 +306,7 @@ describe("OAuth session service", () => {
       tokens,
       users: userPort,
     });
-    return { completed, membershipPort, memberships, paymentPort, planPort, plans, receiptPort, service, tokens, userPort, users };
+    return { completed, membershipPort, memberships, paymentPort, paymentRecords, planPort, plans, receiptPort, service, tokens, userPort, users };
   };
 
   it("starts authorization with state, nonce, S256 PKCE and hardened cookies", () => {
@@ -1034,6 +1040,34 @@ describe("OAuth session service", () => {
     completed.set(actor.userId, { ...completed.get(actor.userId)!, roles: ["STUDENT"] });
     await expect(service.recordAdminPayment(request(), "correlation-3", command))
       .rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+  });
+
+  it("scopes payment history and receipt access to the authenticated student", async () => {
+    const { completed, paymentPort, paymentRecords, receiptPort, service, userPort } = setup();
+    const actor = { ...identity, createdAt: "2026-08-08T12:00:00Z", userId: "student-payments" };
+    await userPort.createPending(actor);
+    completed.set(actor.userId, { createdAt: actor.createdAt, displayName: "Alumna", email: actor.email, emailVerified: true, id: actor.userId, roles: ["STUDENT"], status: "ACTIVE", updatedAt: actor.createdAt, version: 2 });
+    paymentRecords.push({ amount: 100_000, createdAt: actor.createdAt, currency: "PYG", id: "payment-own", membershipId: "membership-1", method: "CASH", paidAt: "2026-08-08T13:00:00.000Z", paymentDate: "2026-08-08", periodEnd: "2026-08-31", periodStart: "2026-08-01", receiptKey: "payment-receipts/own.pdf", recordedBy: "staff", status: "CONFIRMED", updatedAt: actor.createdAt, userId: actor.userId, version: 1 });
+    const request = new Request("https://app.example.com/api/v1/me/payments", { headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token` } });
+    await expect(service.getOwnPayments(request, {})).resolves.toMatchObject({ payments: [{ hasReceipt: true, id: "payment-own" }] });
+    expect(paymentPort.listHistory).toHaveBeenCalledWith(actor.userId, expect.any(Object));
+    await expect(service.getOwnPaymentReceipt(request, { paidAt: "2026-08-08T13:00:00.000Z", paymentId: "payment-own" })).resolves.toEqual({ url: "/signed-download" });
+    expect(receiptPort.issueDownload).toHaveBeenCalledWith("payment-receipts/own.pdf");
+    const foreign = Buffer.from(JSON.stringify({ cursor: { PK: "USER#other", SK: "PAYMENT#2026-08-08T13:00:00.000Z#payment-other" }, owner: "other" }), "utf8").toString("base64url");
+    await expect(service.getOwnPayments(request, { cursor: foreign })).rejects.toMatchObject({ status: 422 });
+  });
+
+  it("allows active STAFF payment reports and denies students", async () => {
+    for (const scenario of [{ allowed: true, role: "STAFF" as const }, { allowed: false, role: "STUDENT" as const }]) {
+      const { completed, service, userPort } = setup();
+      const actor = { ...identity, createdAt: "2026-08-08T12:00:00Z", userId: `report-${scenario.role}` };
+      await userPort.createPending(actor);
+      completed.set(actor.userId, { createdAt: actor.createdAt, displayName: "Actor", email: actor.email, emailVerified: true, id: actor.userId, roles: [scenario.role], status: "ACTIVE", updatedAt: actor.createdAt, version: 2 });
+      const request = new Request("https://app.example.com/api/v1/admin/payments", { headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token` } });
+      const operation = service.listAdminPayments(request, { filter: "date", value: "2026-08-08" });
+      if (scenario.allowed) await expect(operation).resolves.toMatchObject({ payments: [] });
+      else await expect(operation).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+    }
   });
 
   it("allows active STAFF reports, binds cursors to the filter and denies inactive actors", async () => {

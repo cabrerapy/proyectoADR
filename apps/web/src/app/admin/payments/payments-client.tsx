@@ -6,6 +6,8 @@ interface Membership { readonly endDate: string; readonly id: string; readonly p
 interface MembershipPage { readonly memberships: readonly Membership[] }
 interface UploadIntent { readonly headers: Readonly<Record<string, string>>; readonly key: string; readonly uploadUrl: string }
 interface ApiFailure { readonly message?: string }
+interface PaymentView { readonly amount: number; readonly id: string; readonly paidAt: string; readonly status: string; readonly userId: string }
+interface PaymentQueryPage { readonly cursor?: string; readonly payments: readonly PaymentView[] }
 
 const failure = async (response: Response, fallback: string): Promise<Error> => {
   try { return new Error(((await response.json()) as ApiFailure).message ?? fallback); } catch { return new Error(fallback); }
@@ -83,6 +85,7 @@ export function AdminPaymentsClient() {
 
   return <div>
     <header><p className="text-sm font-bold uppercase tracking-wide text-accent">Administración</p><h1 className="mt-2 text-3xl font-black sm:text-4xl">Registrar pago</h1><p className="mt-3 max-w-3xl leading-7 text-muted">Registra un pago manual asociado a una membresía. El comprobante es opcional y permanece privado.</p></header>
+    <PaymentReports />
     <form className="mt-8 flex flex-col gap-3 sm:flex-row sm:items-end" onSubmit={(event) => void search(event)}>
       <div className="grow"><label className="block font-bold" htmlFor="payment-student">Identificador del alumno</label><input className="mt-2 min-h-11 w-full rounded-lg border border-slate-400 px-3" id="payment-student" name="studentId" required /></div>
       <button className="min-h-11 rounded-lg bg-brand-900 px-6 font-bold text-white disabled:opacity-60" disabled={loading} type="submit">{loading ? "Consultando…" : "Consultar"}</button>
@@ -104,4 +107,32 @@ export function AdminPaymentsClient() {
       <button className="min-h-11 rounded-lg bg-accent px-6 font-bold text-brand-900 disabled:opacity-60 sm:col-span-2" disabled={busy} type="submit">{busy ? "Registrando…" : "Registrar pago"}</button>
     </form> : null}
   </div>;
+}
+
+function PaymentReports() {
+  const [page, setPage] = useState<PaymentQueryPage>();
+  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const load = async (value: string, cursor?: string) => {
+    setLoading(true); setError("");
+    try {
+      const params = new URLSearchParams(value);
+      if (cursor !== undefined) params.set("cursor", cursor);
+      const response = await fetch(`/api/v1/admin/payments?${params.toString()}`, { cache: "no-store" });
+      if (!response.ok) throw await failure(response, "No pudimos consultar los pagos.");
+      const result = await response.json() as PaymentQueryPage;
+      setPage((current) => cursor === undefined ? result : { ...result, payments: [...(current?.payments ?? []), ...result.payments] });
+    } catch (reason: unknown) { setError(reason instanceof Error ? reason.message : "No pudimos consultar los pagos."); }
+    finally { setLoading(false); }
+  };
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const filter = String(data.get("filter"));
+    const value = filter === "date" ? String(data.get("date")) : String(data.get("status"));
+    const next = new URLSearchParams({ filter, value }).toString();
+    setQuery(next); void load(next);
+  };
+  return <section className="mt-10 border-b border-black/10 pb-10" aria-labelledby="payment-reports-title"><h2 className="text-2xl font-black" id="payment-reports-title">Consultar pagos</h2><form className="mt-5 grid gap-4 sm:grid-cols-3" onSubmit={submit}><div><label className="block font-bold" htmlFor="payment-filter">Filtro</label><select className="mt-2 min-h-11 w-full rounded-lg border border-slate-400 px-3" id="payment-filter" name="filter"><option value="date">Fecha</option><option value="status">Estado</option></select></div><div><label className="block font-bold" htmlFor="payment-report-date">Fecha</label><input className="mt-2 min-h-11 w-full rounded-lg border border-slate-400 px-3" id="payment-report-date" name="date" type="date" /></div><div><label className="block font-bold" htmlFor="payment-report-status">Estado</label><select className="mt-2 min-h-11 w-full rounded-lg border border-slate-400 px-3" id="payment-report-status" name="status"><option value="CONFIRMED">Confirmado</option><option value="PENDING">Pendiente</option><option value="VOIDED">Anulado</option></select></div><button className="min-h-11 rounded-lg border border-brand-900 px-5 font-bold text-brand-900 disabled:opacity-60 sm:col-span-3" disabled={loading} type="submit">{loading ? "Consultando…" : "Consultar pagos"}</button></form><p aria-live="assertive" className="mt-4 font-semibold text-red-700">{error}</p>{page?.payments.length === 0 ? <p className="mt-5 rounded-xl bg-canvas p-5 text-muted">No hay pagos para el filtro seleccionado.</p> : null}{page === undefined || page.payments.length === 0 ? null : <><ul className="mt-5 grid gap-3 md:grid-cols-2">{page.payments.map((payment) => <li className="rounded-xl bg-canvas p-4" key={`${payment.userId}-${payment.id}`}><strong>{new Intl.NumberFormat("es-PY", { currency: "PYG", maximumFractionDigits: 0, style: "currency" }).format(payment.amount)}</strong><p className="mt-1 text-sm">Alumno: {payment.userId}</p><p className="text-sm">{payment.status} · {new Date(payment.paidAt).toLocaleString("es-PY", { timeZone: "America/Asuncion" })}</p></li>)}</ul>{page.cursor === undefined ? null : <button className="mt-5 min-h-11 rounded-lg border border-brand-900 px-5 font-bold text-brand-900 disabled:opacity-60" disabled={loading} onClick={() => void load(query, page.cursor)} type="button">{loading ? "Cargando…" : "Cargar más"}</button>}</>}</section>;
 }

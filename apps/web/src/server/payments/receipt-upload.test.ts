@@ -12,6 +12,10 @@ describe("LocalReceiptUploadSigner", () => {
     await expect(signer.consumeLocal(token, new Request("http://localhost/upload", {
       body: new Uint8Array([1, 2, 3, 4]), headers: { "content-type": "application/pdf" }, method: "PUT",
     }))).resolves.toBeUndefined();
+    const downloadUrl = await signer.issueDownload(intent.key);
+    const downloadToken = downloadUrl.split("/").at(-1) ?? "";
+    const download = await signer.consumeLocalDownload(downloadToken);
+    expect(new Uint8Array(await download.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3, 4]));
     await expect(signer.consumeLocal(token, new Request("http://localhost/upload", {
       body: new Uint8Array([1, 2, 3, 4]), headers: { "content-type": "application/pdf" }, method: "PUT",
     }))).rejects.toMatchObject({ status: 404 });
@@ -41,6 +45,8 @@ describe("LocalReceiptUploadSigner", () => {
       expect(intent.headers).toMatchObject({
         "content-length": "3", "content-type": "image/png", "x-amz-server-side-encryption": "AES256",
       });
+      const download = new URL(await new S3ReceiptUploadSigner(client, "private-receipts-test").issueDownload(intent.key));
+      expect(download.searchParams.get("X-Amz-Expires")).toBe("300");
     } finally {
       client.destroy();
     }

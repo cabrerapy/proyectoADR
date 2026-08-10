@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { PaymentReceiptUploadCommand } from "@gym-adr/validation";
 
@@ -14,7 +14,9 @@ export interface ReceiptUpload {
 
 export interface ReceiptUploadPort {
   issue(input: PaymentReceiptUploadCommand): Promise<ReceiptUpload>;
+  issueDownload(key: string): Promise<string>;
   consumeLocal?(token: string, request: Request): Promise<void>;
+  consumeLocalDownload?(token: string): Promise<Response>;
 }
 
 const extensionByType = {
@@ -48,20 +50,29 @@ export class S3ReceiptUploadSigner implements ReceiptUploadPort {
       uploadUrl: await getSignedUrl(this.client, command, { expiresIn: 300 }),
     };
   }
+
+  async issueDownload(key: string): Promise<string> {
+    return getSignedUrl(this.client, new GetObjectCommand({ Bucket: this.bucket, Key: key }), { expiresIn: 300 });
+  }
 }
 
 interface LocalIntent {
   readonly contentType: string;
+  readonly key: string;
   readonly size: number;
 }
 
+interface LocalObject { readonly body: ArrayBuffer; readonly contentType: string }
+
 export class LocalReceiptUploadSigner implements ReceiptUploadPort {
   private readonly intents = new Map<string, LocalIntent>();
+  private readonly objects = new Map<string, LocalObject>();
+  private readonly downloads = new Map<string, string>();
 
   async issue(input: PaymentReceiptUploadCommand): Promise<ReceiptUpload> {
     const token = randomUUID();
     const key = `payment-receipts/${randomUUID()}.${extensionByType[input.contentType]}`;
-    this.intents.set(token, { contentType: input.contentType, size: input.size });
+    this.intents.set(token, { contentType: input.contentType, key, size: input.size });
     return {
       headers: { "content-type": input.contentType },
       key,
@@ -79,6 +90,24 @@ export class LocalReceiptUploadSigner implements ReceiptUploadPort {
     if (body.byteLength !== intent.size) {
       throw new ApiError(422, apiErrorCodes.validationError, "El tamaño del comprobante no coincide con la firma.");
     }
+    this.objects.set(intent.key, { body, contentType: intent.contentType });
     this.intents.delete(token);
+  }
+
+  async issueDownload(key: string): Promise<string> {
+    if (!this.objects.has(key)) throw new ApiError(404, apiErrorCodes.notFound, "El comprobante no está disponible.");
+    const token = randomUUID();
+    this.downloads.set(token, key);
+    return `/api/v1/payment-receipts/local/${token}`;
+  }
+
+  async consumeLocalDownload(token: string): Promise<Response> {
+    const key = this.downloads.get(token);
+    const object = key === undefined ? undefined : this.objects.get(key);
+    if (object === undefined) throw new ApiError(404, apiErrorCodes.notFound, "El enlace firmado no existe o expiró.");
+    this.downloads.delete(token);
+    return new Response(object.body.slice(0), {
+      headers: { "cache-control": "private, no-store", "content-type": object.contentType },
+    });
   }
 }

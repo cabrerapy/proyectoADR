@@ -23,6 +23,17 @@ export interface PaymentReceiptUploadCommand {
   readonly size: number;
 }
 
+export interface OwnPaymentQuery { readonly cursor?: string }
+export interface AdminPaymentQuery {
+  readonly cursor?: string;
+  readonly filter: "date" | "status";
+  readonly value: "CONFIRMED" | "PENDING" | "VOIDED" | string;
+}
+export interface PaymentReceiptQuery {
+  readonly paidAt: string;
+  readonly paymentId: string;
+}
+
 const issue = (path: string, message: string): ValidationIssue => ({
   code: "INVALID_PAYMENT_FIELD",
   message,
@@ -48,6 +59,38 @@ const text = (value: unknown, maximum: number): string | undefined => {
   if (typeof value !== "string") return undefined;
   const normalized = value.trim().normalize("NFKC").replace(/\s+/gu, " ");
   return normalized.length > 0 && normalized.length <= maximum ? normalized : undefined;
+};
+const cursor = (value: string | null): string | undefined =>
+  value !== null && value.length <= 8_192 && /^[A-Za-z0-9_-]+$/u.test(value) ? value : undefined;
+
+export const validateOwnPaymentQuery = (params: URLSearchParams): ValidationResult<OwnPaymentQuery> => {
+  const issues: ValidationIssue[] = [...params.keys()].some((key) => key !== "cursor") ? [issue("$", "La consulta incluye parámetros no permitidos.")] : [];
+  const raw = params.get("cursor");
+  const parsed = cursor(raw);
+  if (raw !== null && parsed === undefined) issues.push(issue("cursor", "El cursor no es válido."));
+  return result(issues, parsed === undefined ? {} : { cursor: parsed });
+};
+
+export const validateAdminPaymentQuery = (params: URLSearchParams): ValidationResult<AdminPaymentQuery> => {
+  const issues: ValidationIssue[] = [...params.keys()].some((key) => !["cursor", "filter", "value"].includes(key)) ? [issue("$", "La consulta incluye parámetros no permitidos.")] : [];
+  const filter = params.get("filter");
+  const value = params.get("value") ?? "";
+  if (filter !== "date" && filter !== "status") issues.push(issue("filter", "Selecciona un filtro válido."));
+  if (filter === "date" && date(value) === undefined) issues.push(issue("value", "La fecha no es válida."));
+  if (filter === "status" && !["PENDING", "CONFIRMED", "VOIDED"].includes(value)) issues.push(issue("value", "El estado no es válido."));
+  const raw = params.get("cursor");
+  const parsed = cursor(raw);
+  if (raw !== null && parsed === undefined) issues.push(issue("cursor", "El cursor no es válido."));
+  return result(issues, { ...(parsed === undefined ? {} : { cursor: parsed }), filter: filter === "status" ? "status" : "date", value });
+};
+
+export const validatePaymentReceiptQuery = (params: URLSearchParams): ValidationResult<PaymentReceiptQuery> => {
+  const issues: ValidationIssue[] = [...params.keys()].some((key) => key !== "paidAt" && key !== "paymentId") ? [issue("$", "La consulta incluye parámetros no permitidos.")] : [];
+  const paidAt = timestamp(params.get("paidAt"));
+  const paymentId = id(params.get("paymentId"));
+  if (paidAt === undefined) issues.push(issue("paidAt", "La fecha del pago no es válida."));
+  if (paymentId === undefined) issues.push(issue("paymentId", "El pago no es válido."));
+  return result(issues, { paidAt: paidAt ?? "", paymentId: paymentId ?? "" });
 };
 
 export const validateRecordPayment = (value: unknown): ValidationResult<RecordPaymentCommand> => {
