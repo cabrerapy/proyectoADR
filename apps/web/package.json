@@ -16,8 +16,10 @@
     "test:e2e": "npm run build && node scripts/run-e2e.mjs"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "3.984.0",
     "@aws-sdk/client-secrets-manager": "3.984.0",
     "@aws-sdk/client-ssm": "3.984.0",
+    "@aws-sdk/s3-request-presigner": "3.984.0",
     "@gym-adr/data-access": "0.1.0",
     "@gym-adr/domain": "0.1.0",
     "@gym-adr/validation": "0.1.0",

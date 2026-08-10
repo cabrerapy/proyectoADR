@@ -3,10 +3,12 @@ import {
   SecretsManagerClient,
 } from "@aws-sdk/client-secrets-manager";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
+import { S3Client } from "@aws-sdk/client-s3";
 import {
   createDynamoDbAdapter,
   MembershipRepository,
   MembershipPlanRepository,
+  PaymentRepository,
   SearchTokenService,
   UserRepository,
 } from "@gym-adr/data-access";
@@ -15,6 +17,10 @@ import { resolveAuthConfig } from "./auth-config";
 import { AuthService } from "./auth-service";
 import { CognitoTokenClient } from "./cognito-client";
 import { FixedWindowRateLimiter } from "./rate-limiter";
+import {
+  LocalReceiptUploadSigner,
+  S3ReceiptUploadSigner,
+} from "../payments/receipt-upload";
 
 let servicePromise: Promise<AuthService> | undefined;
 const limiter = new FixedWindowRateLimiter();
@@ -102,12 +108,23 @@ const createService = async (): Promise<AuthService> => {
       { secret: await loadSearchKey(), version: "v1" },
     ]),
   );
+  const receipts = config.environment === "local"
+    ? new LocalReceiptUploadSigner()
+    : (() => {
+        const bucket = process.env.PAYMENT_RECEIPTS_BUCKET_NAME;
+        if (bucket === undefined || region === undefined) {
+          throw new Error("Missing private payment receipt bucket configuration");
+        }
+        return new S3ReceiptUploadSigner(new S3Client({ region }), bucket);
+      })();
   return new AuthService({
     config,
     rateLimiter: limiter,
     memberships: new MembershipRepository(adapter, tableName),
+    payments: new PaymentRepository(adapter, tableName),
     plans: new MembershipPlanRepository(adapter, tableName),
     tokens: new CognitoTokenClient(config),
+    receipts,
     users,
   });
 };

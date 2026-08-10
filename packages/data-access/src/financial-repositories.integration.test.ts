@@ -47,6 +47,8 @@ const membershipInput = {
 
 const paymentInput = {
   amount: 250_000,
+  auditId: "audit-payment-001",
+  correlationId: "correlation-payment-001",
   createdAt: "2026-08-08T13:00:00Z",
   currency: "PYG",
   membershipId: "membership-001",
@@ -228,6 +230,11 @@ describe.skipIf(!enabled)("financial repositories with DynamoDB Local", () => {
       .toHaveLength(1);
     expect(attempts.filter(({ disposition }) => disposition === "REPLAYED"))
       .toHaveLength(7);
+    await expect(payments.record({
+      ...paymentInput,
+      correlationId: "correlation-payment-retry",
+      createdAt: "2026-08-08T13:01:00Z",
+    })).resolves.toMatchObject({ disposition: "REPLAYED", value: { id: "payment-001" } });
     await expect(
       payments.record({ ...paymentInput, amount: 300_000 }),
     ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
@@ -237,6 +244,12 @@ describe.skipIf(!enabled)("financial repositories with DynamoDB Local", () => {
       .resolves.toMatchObject({ payments: [{ id: "payment-001" }] });
     await expect(payments.listByStatus("CONFIRMED"))
       .resolves.toMatchObject({ payments: [{ id: "payment-001" }] });
+    await expect(audits.listByEntity(
+      "Payment",
+      "payment-001",
+      "2026-08-08T00:00:00Z",
+      "2026-08-09T00:00:00Z",
+    )).resolves.toMatchObject({ entries: [{ action: "PAYMENT_RECORDED" }] });
   });
 
   it("voids idempotently without deleting the confirmed payment history", async () => {

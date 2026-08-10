@@ -8,6 +8,7 @@ import {
 } from "@gym-adr/domain";
 
 import { BaseDynamoDbRepository } from "./base-repository";
+import { AuditLogRepository } from "./audit-log-repository";
 import type {
   DynamoDbDocumentPort,
   DynamoDbItem,
@@ -41,6 +42,8 @@ import { CURRENT_SCHEMA_VERSION, type PrimaryKey } from "./model-types";
 
 export interface RecordPaymentInput {
   readonly amount: number;
+  readonly auditId: string;
+  readonly correlationId: string;
   readonly createdAt: string;
   readonly currency: string;
   readonly membershipId: string;
@@ -191,6 +194,22 @@ export class PaymentRepository {
       putAbsent(this.table, this.toItem(payment, key)),
       putAbsent(this.table, this.dateView(payment, key)),
       putAbsent(this.table, this.statusView(payment, key)),
+      new AuditLogRepository(this.document, this.table).createAppendAction({
+        action: "PAYMENT_RECORDED",
+        actorId: payment.recordedBy,
+        auditId: financialId(input.auditId, "auditId"),
+        correlationId: financialId(input.correlationId, "correlationId"),
+        details: {
+          amount: payment.amount,
+          currency: payment.currency,
+          method: payment.method,
+          status: payment.status,
+        },
+        result: "SUCCEEDED",
+        targetId: payment.id,
+        targetType: "Payment",
+        timestamp: payment.createdAt,
+      }).action,
     ];
     const result = await this.transactPayment(
       {
@@ -200,7 +219,7 @@ export class PaymentRepository {
         requestKey: financialId(input.requestKey, "requestKey"),
         result: { paidAt: payment.paidAt, paymentId: payment.id, userId: payment.userId },
         retention: { kind: "DURABLE" },
-        subjectId: payment.userId,
+        subjectId: payment.recordedBy,
       },
       actions,
     );
@@ -735,7 +754,6 @@ export class PaymentRepository {
   ): JsonValue {
     return {
       amount: payment.amount,
-      createdAt: payment.createdAt,
       currency: payment.currency,
       membershipId: payment.membershipId,
       membershipStartDate,
@@ -754,7 +772,7 @@ export class PaymentRepository {
   }
 
   private validatePayment(
-    input: Omit<RecordPaymentInput, "status"> & { readonly status: Exclude<PaymentStatus, "VOIDED"> },
+    input: Omit<RecordPaymentInput, "auditId" | "correlationId" | "status"> & { readonly status: Exclude<PaymentStatus, "VOIDED"> },
     version = 1,
     updatedAtInput = input.createdAt,
     persistedStatus: PaymentStatus = input.status,

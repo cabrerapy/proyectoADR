@@ -36,6 +36,8 @@ const membershipInput = {
 
 const paymentInput = {
   amount: 250_000,
+  auditId: "audit-payment-001",
+  correlationId: "correlation-payment-001",
   createdAt: "2026-08-08T13:00:00Z",
   currency: "PYG",
   membershipId: "membership-001",
@@ -184,10 +186,13 @@ describe("financial repositories", () => {
     });
 
     const transaction = vi.mocked(port.transactWrite).mock.calls[0]?.[0];
-    expect(transaction?.TransactItems).toHaveLength(6);
+    expect(transaction?.TransactItems).toHaveLength(7);
     expect(transaction?.TransactItems?.filter(({ ConditionCheck }) =>
       ConditionCheck !== undefined
     )).toHaveLength(2);
+    expect(transaction?.TransactItems?.some(({ Put }) =>
+      Put?.Item?.entityType === "AuditLog" && Put.Item.action === "PAYMENT_RECORDED"
+    )).toBe(true);
     expect(transaction?.TransactItems).toEqual(
       expect.arrayContaining([
         expect.objectContaining({

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   DynamoDbRepositoryError,
@@ -11,6 +11,8 @@ import {
   type MembershipPlanCursors,
   type MembershipPlanPage,
   type MembershipPage,
+  type PaymentMutationResult,
+  type RecordPaymentInput,
   type TransitionUserStatusInput,
   type UpdateMembershipPlanInput,
   type UpdateMembershipInput,
@@ -26,6 +28,7 @@ import {
   type Membership,
   type MembershipPlan,
   type MembershipStanding,
+  type Payment,
   type UserProfile,
   type UserStatus,
 } from "@gym-adr/domain";
@@ -38,6 +41,8 @@ import type {
   MembershipHistoryQuery,
   MembershipReportQuery,
   OwnMembershipQuery,
+  PaymentReceiptUploadCommand,
+  RecordPaymentCommand,
   TransitionStudentStatusInput,
   UpdateMembershipPlanCommand,
   UpdateMembershipCommand,
@@ -58,6 +63,7 @@ import {
   AuthorizedRepositoryScope,
   principalFromProfile,
 } from "./repository-scope";
+import type { ReceiptUpload, ReceiptUploadPort } from "../payments/receipt-upload";
 
 export interface PendingUserPort {
   createPending(input: {
@@ -99,6 +105,10 @@ export interface MembershipPort {
   listDue(dueDate: string, options?: { readonly cursors?: MembershipFanOutCursors; readonly limitPerShard?: number }): Promise<MembershipPage>;
   listHistory(userId: string, options?: { readonly consistentRead?: boolean; readonly cursor?: DynamoDbKey; readonly limit?: number }): Promise<{ readonly memberships: readonly Membership[]; readonly cursor?: DynamoDbKey }>;
   update(input: UpdateMembershipInput): Promise<Membership>;
+}
+
+export interface PaymentPort {
+  record(input: RecordPaymentInput): Promise<PaymentMutationResult<Payment>>;
 }
 
 export interface OnboardingProfile {
@@ -179,8 +189,10 @@ export interface AuthServiceDependencies {
   readonly config: AuthConfig;
   readonly ids?: () => string;
   readonly memberships?: MembershipPort;
+  readonly payments?: PaymentPort;
   readonly plans?: MembershipPlanPort;
   readonly rateLimiter: RateLimiter;
+  readonly receipts?: ReceiptUploadPort;
   readonly tokens: CognitoTokenPort;
   readonly users: PendingUserPort;
 }
@@ -953,6 +965,85 @@ export class AuthService {
     }
   }
 
+  async createPaymentReceiptUpload(
+    request: Request,
+    input: PaymentReceiptUploadCommand,
+  ): Promise<ReceiptUpload> {
+    this.assertSameOrigin(request);
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "payment-receipt"), 20);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("PAYMENT_RECORD");
+      return await this.receiptUploader().issue(input);
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible preparar la carga del comprobante.");
+    }
+  }
+
+  async consumeLocalPaymentReceipt(token: string, request: Request): Promise<void> {
+    const consume = this.receiptUploader().consumeLocal;
+    if (consume === undefined) throw new ApiError(404, apiErrorCodes.notFound, "La carga local no está disponible.");
+    await consume.call(this.receiptUploader(), token, request);
+  }
+
+  async recordAdminPayment(
+    request: Request,
+    correlationId: string,
+    input: RecordPaymentCommand,
+  ): Promise<PaymentMutationResult<Payment>> {
+    this.assertSameOrigin(request);
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "payment-write"), 20);
+    const requestKey = request.headers.get("idempotency-key");
+    if (requestKey === null || !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u.test(requestKey)) {
+      throw new ApiError(422, apiErrorCodes.validationError, "La clave de idempotencia no es válida.");
+    }
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("PAYMENT_RECORD");
+      const membership = await this.membershipRepository().getById(
+        input.userId,
+        input.membershipStartDate,
+        input.membershipId,
+        true,
+      );
+      if (membership === undefined) throw new ApiError(404, apiErrorCodes.notFound, "No se encontró la membresía indicada.");
+      if (input.periodStart < membership.startDate || input.periodEnd > membership.endDate) {
+        throw new ApiError(422, apiErrorCodes.validationError, "El periodo pagado debe estar dentro de la membresía.");
+      }
+      const operationHash = createHash("sha256")
+        .update(`${principal.id}\0${requestKey}`, "utf8")
+        .digest("hex")
+        .slice(0, 32);
+      const now = this.clock().toISOString();
+      return await this.paymentRepository().record({
+        ...input,
+        auditId: `audit-${operationHash}`,
+        correlationId,
+        createdAt: now,
+        currency: "PYG",
+        paidAt: input.paidAt,
+        paymentDate: localCalendarDate(new Date(input.paidAt)),
+        paymentId: `payment-${operationHash}`,
+        recordedBy: principal.id,
+        requestKey,
+      });
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      if (error instanceof DynamoDbRepositoryError) {
+        if (error.code === "IDEMPOTENCY_CONFLICT" || error.code === "PAYMENT_CONFLICT") {
+          throw new ApiError(409, apiErrorCodes.conflict, "El pago ya fue registrado con datos distintos o cambió durante la operación.");
+        }
+        if (error.code === "INVALID_INPUT") {
+          throw new ApiError(422, apiErrorCodes.validationError, "Los datos del pago no son válidos.");
+        }
+      }
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible registrar el pago.");
+    }
+  }
+
   logout(request: Request): Response {
     this.assertSameOrigin(request);
     this.assertRateLimit(requestRateKey(request, "logout"), 20);
@@ -1021,6 +1112,20 @@ export class AuthService {
       throw new ApiError(500, apiErrorCodes.internalError, "El servicio de membresías no está configurado.");
     }
     return this.dependencies.memberships;
+  }
+
+  private paymentRepository(): PaymentPort {
+    if (this.dependencies.payments === undefined) {
+      throw new ApiError(500, apiErrorCodes.internalError, "El servicio de pagos no está configurado.");
+    }
+    return this.dependencies.payments;
+  }
+
+  private receiptUploader(): ReceiptUploadPort {
+    if (this.dependencies.receipts === undefined) {
+      throw new ApiError(500, apiErrorCodes.internalError, "La carga de comprobantes no está configurada.");
+    }
+    return this.dependencies.receipts;
   }
 
   private membershipStatus(value: string): Membership["status"] {

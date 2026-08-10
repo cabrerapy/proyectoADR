@@ -16,4 +16,5 @@ export type ValidationResult<T> =
 export * from "./admin-student";
 export * from "./membership-plan";
 export * from "./membership";
+export * from "./payment";
 export * from "./profile";

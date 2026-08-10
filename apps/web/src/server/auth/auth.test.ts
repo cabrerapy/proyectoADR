@@ -5,7 +5,7 @@ import {
   SignJWT,
 } from "jose";
 import type { CreatePendingUserResult } from "@gym-adr/data-access";
-import type { Membership, MembershipPlan, UserProfile } from "@gym-adr/domain";
+import type { Membership, MembershipPlan, Payment, UserProfile } from "@gym-adr/domain";
 import {
   validateAdminStudentQuery,
   validateCompleteProfile,
@@ -20,11 +20,12 @@ import {
 import { describe, expect, it, vi } from "vitest";
 
 import { resolveAuthConfig, type AuthConfig } from "./auth-config";
-import { AuthService, type MembershipPlanPort, type MembershipPort, type PendingUserPort } from "./auth-service";
+import { AuthService, type MembershipPlanPort, type MembershipPort, type PaymentPort, type PendingUserPort } from "./auth-service";
 import { CognitoTokenClient, type CognitoTokenPort } from "./cognito-client";
 import { oauthCookieNames, sessionCookieName } from "./cookies";
 import { FixedWindowRateLimiter } from "./rate-limiter";
 import type { RateLimiter } from "./rate-limiter";
+import type { ReceiptUploadPort } from "../payments/receipt-upload";
 
 const config: AuthConfig = {
   appBaseUrl: "https://app.example.com",
@@ -269,18 +270,37 @@ describe("OAuth session service", () => {
         return membership;
       }),
     };
+    const paymentPort: PaymentPort = {
+      record: vi.fn(async (input) => ({
+        disposition: "CREATED" as const,
+        value: {
+          amount: input.amount, createdAt: input.createdAt, currency: input.currency,
+          id: input.paymentId, membershipId: input.membershipId, method: input.method,
+          ...(input.notes === undefined ? {} : { notes: input.notes }), paidAt: input.paidAt,
+          paymentDate: input.paymentDate, periodEnd: input.periodEnd, periodStart: input.periodStart,
+          ...(input.receiptKey === undefined ? {} : { receiptKey: input.receiptKey }),
+          recordedBy: input.recordedBy, status: input.status, updatedAt: input.createdAt,
+          userId: input.userId, version: 1,
+        } satisfies Payment,
+      })),
+    };
+    const receiptPort: ReceiptUploadPort = {
+      issue: vi.fn(async () => ({ headers: { "content-type": "application/pdf" }, key: "payment-receipts/test.pdf", uploadUrl: "/signed-upload" })),
+    };
     let sequence = 0;
     const service = new AuthService({
       clock: () => new Date("2026-08-08T12:00:00Z"),
       config,
       ids: () => `user-${++sequence}`,
       memberships: membershipPort,
+      payments: paymentPort,
       plans: planPort,
       rateLimiter,
+      receipts: receiptPort,
       tokens,
       users: userPort,
     });
-    return { completed, membershipPort, memberships, planPort, plans, service, tokens, userPort, users };
+    return { completed, membershipPort, memberships, paymentPort, planPort, plans, receiptPort, service, tokens, userPort, users };
   };
 
   it("starts authorization with state, nonce, S256 PKCE and hardened cookies", () => {
@@ -980,6 +1000,39 @@ describe("OAuth session service", () => {
     await expect(service.getOwnMemberships(request, { cursor: foreignCursor }))
       .rejects.toMatchObject({ code: "VALIDATION_ERROR", status: 422 });
     await expect(service.listAdminMembershipReport(request, { filter: "status", value: "ACTIVE" }))
+      .rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+  });
+
+  it("records an idempotent payment for STAFF and denies unauthorized account states", async () => {
+    const { completed, memberships, paymentPort, service, userPort } = setup();
+    const actor = { ...identity, createdAt: "2026-08-08T12:00:00Z", userId: "staff-payment" };
+    await userPort.createPending(actor);
+    completed.set(actor.userId, {
+      createdAt: actor.createdAt, displayName: "Caja", email: actor.email, emailVerified: true,
+      id: actor.userId, roles: ["STAFF"], status: "ACTIVE", updatedAt: actor.createdAt, version: 2,
+    });
+    memberships.set("membership-payment", {
+      createdAt: actor.createdAt, createdBy: "admin", currency: "PYG", endDate: "2026-09-08",
+      expectedAmount: 250_000, frequency: "MONTHLY", id: "membership-payment", planId: "plan-1",
+      planName: "Plan mensual", startDate: "2026-08-08", status: "ACTIVE",
+      updatedAt: actor.createdAt, userId: "student-payment", version: 1,
+    });
+    const request = () => new Request("https://app.example.com/api/v1/admin/payments", {
+      headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token`, "idempotency-key": "request-payment-001", origin: config.appBaseUrl }, method: "POST",
+    });
+    const command = {
+      amount: 250_000, membershipId: "membership-payment", membershipStartDate: "2026-08-08",
+      method: "CASH" as const, paidAt: "2026-08-08T13:00:00.000Z", periodEnd: "2026-09-08",
+      periodStart: "2026-08-08", status: "CONFIRMED" as const, userId: "student-payment",
+    };
+    await expect(service.recordAdminPayment(request(), "correlation-1", command)).resolves.toMatchObject({ disposition: "CREATED" });
+    await expect(service.recordAdminPayment(request(), "correlation-2", command)).resolves.toMatchObject({ disposition: "CREATED" });
+    const calls = vi.mocked(paymentPort.record).mock.calls;
+    expect(calls[0]?.[0].paymentId).toBe(calls[1]?.[0].paymentId);
+    expect(calls[0]?.[0]).toMatchObject({ currency: "PYG", paymentDate: "2026-08-08", recordedBy: actor.userId });
+
+    completed.set(actor.userId, { ...completed.get(actor.userId)!, roles: ["STUDENT"] });
+    await expect(service.recordAdminPayment(request(), "correlation-3", command))
       .rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
   });
 
