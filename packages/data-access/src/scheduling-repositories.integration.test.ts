@@ -12,8 +12,43 @@ import {
   ReservationRepository,
   SchedulingCatalogRepository,
   AuditLogRepository,
+  type DynamoDbDocumentPort,
   primaryKeys,
 } from "./index";
+
+class PostCommitTimeoutPort implements DynamoDbDocumentPort {
+  private mustFail = true;
+
+  constructor(private readonly delegate: DynamoDbDocumentPort) {}
+
+  readonly batchGet = (
+    input: Parameters<DynamoDbDocumentPort["batchGet"]>[0],
+  ) => this.delegate.batchGet(input);
+
+  readonly destroy = (): void => undefined;
+
+  readonly get = (input: Parameters<DynamoDbDocumentPort["get"]>[0]) =>
+    this.delegate.get(input);
+
+  readonly put = (input: Parameters<DynamoDbDocumentPort["put"]>[0]) =>
+    this.delegate.put(input);
+
+  readonly query = (input: Parameters<DynamoDbDocumentPort["query"]>[0]) =>
+    this.delegate.query(input);
+
+  readonly transactWrite = async (
+    input: Parameters<DynamoDbDocumentPort["transactWrite"]>[0],
+  ) => {
+    const result = await this.delegate.transactWrite(input);
+    if (this.mustFail) {
+      this.mustFail = false;
+      const timeout = new Error("Tiempo de espera simulado después del commit.");
+      timeout.name = "TimeoutError";
+      throw timeout;
+    }
+    return result;
+  };
+}
 
 const enabled = process.env.DYNAMODB_LOCAL_INTEGRATION === "1";
 const tableName = `gym-adr-platform-scheduling-${Date.now()}`;
@@ -306,6 +341,115 @@ describe.skipIf(!enabled)("scheduling repositories with DynamoDB Local", () => {
       .rejects.toMatchObject({ code: "BOOKING_CONFLICT" });
     await expect(sessions.getById(session.id)).resolves.toMatchObject({ confirmedCount: 0, version: 1 });
     await expect(reservations.getForStudent(session.id, studentId)).resolves.toBeUndefined();
+  });
+
+  it("keeps N+M concurrent retries within capacity and synchronizes the counter", async () => {
+    const capacity = 4;
+    const session = await sessions.create({
+      ...firstClass,
+      auditId: "audit-class-load-001",
+      capacity,
+      classDate: "2026-08-18",
+      classId: "class-load-001",
+      endsAt: "2026-08-18T23:00:00Z",
+      startsAt: "2026-08-18T22:00:00Z",
+    });
+    const todayEpochDay = Math.floor(Date.parse("2026-08-08T00:00:00Z") / 86_400_000);
+    const inputs = Array.from({ length: 10 }, (_, index) => {
+      const suffix = String(index).padStart(2, "0");
+      const studentId = `load-student-${suffix}`;
+      return {
+        classId: session.id,
+        createdAt: "2026-08-08T18:00:00Z",
+        requestKey: `load-request-${suffix}`,
+        reservationId: `load-reservation-${suffix}`,
+        studentId,
+        todayEpochDay,
+      };
+    });
+    await Promise.all(inputs.flatMap(({ studentId }) => [
+      adapter.put({
+        Item: { ...primaryKeys.userProfile(studentId), createdAt: "2026-08-01T10:00:00Z", entityType: "UserProfile", roles: ["STUDENT"], schemaVersion: 1, status: "ACTIVE", updatedAt: "2026-08-01T10:00:00Z", userId: studentId },
+        TableName: tableName,
+      }),
+      adapter.put({
+        Item: { ...primaryKeys.activeMembership(studentId), createdAt: "2026-08-01T10:00:00Z", endEpochDay: todayEpochDay + 30, entityType: "ActiveMembershipPointer", membershipId: `load-membership-${studentId}`, schemaVersion: 1, startEpochDay: todayEpochDay - 7, status: "ACTIVE", updatedAt: "2026-08-01T10:00:00Z", userId: studentId },
+        TableName: tableName,
+      }),
+    ]));
+
+    const initial = await Promise.allSettled(inputs.map((input) => bookings.reserve(input)));
+    const confirmed = new Set(
+      initial.flatMap((result, index) => result.status === "fulfilled" ? [inputs[index]!.studentId] : []),
+    );
+    expect(confirmed.size).toBeLessThanOrEqual(capacity);
+    for (const input of inputs) {
+      if (confirmed.size >= capacity) break;
+      if (confirmed.has(input.studentId)) continue;
+      try {
+        await bookings.reserve(input);
+        confirmed.add(input.studentId);
+      } catch (error) {
+        expect(error).toMatchObject({ code: "BOOKING_CONFLICT" });
+      }
+    }
+
+    expect(confirmed.size).toBe(capacity);
+    await expect(sessions.getById(session.id)).resolves.toMatchObject({ confirmedCount: capacity });
+    const page = await reservations.listByClass(session.id, { consistentRead: true });
+    expect(page.reservations).toHaveLength(capacity);
+    expect(page.reservations.every(({ status }) => status === "CONFIRMED")).toBe(true);
+  });
+
+  it("replays safely after an ambiguous post-commit timeout", async () => {
+    const session = await sessions.create({
+      ...firstClass,
+      auditId: "audit-class-timeout-001",
+      capacity: 1,
+      classDate: "2026-08-19",
+      classId: "class-timeout-001",
+      endsAt: "2026-08-19T23:00:00Z",
+      startsAt: "2026-08-19T22:00:00Z",
+    });
+    const studentId = "timeout-student-001";
+    const todayEpochDay = Math.floor(Date.parse("2026-08-08T00:00:00Z") / 86_400_000);
+    await adapter.put({ Item: { ...primaryKeys.userProfile(studentId), createdAt: "2026-08-01T10:00:00Z", entityType: "UserProfile", roles: ["STUDENT"], schemaVersion: 1, status: "ACTIVE", updatedAt: "2026-08-01T10:00:00Z", userId: studentId }, TableName: tableName });
+    await adapter.put({ Item: { ...primaryKeys.activeMembership(studentId), createdAt: "2026-08-01T10:00:00Z", endEpochDay: todayEpochDay + 30, entityType: "ActiveMembershipPointer", membershipId: "timeout-membership-001", schemaVersion: 1, startEpochDay: todayEpochDay - 7, status: "ACTIVE", updatedAt: "2026-08-01T10:00:00Z", userId: studentId }, TableName: tableName });
+    const faultedBookings = new BookingRepository(new PostCommitTimeoutPort(adapter), tableName);
+    const input = { classId: session.id, createdAt: "2026-08-08T18:10:00Z", requestKey: "timeout-request-001", reservationId: "timeout-reservation-001", studentId, todayEpochDay } as const;
+
+    await expect(faultedBookings.reserve(input)).rejects.toMatchObject({ code: "UNKNOWN" });
+    await expect(faultedBookings.reserve(input)).resolves.toMatchObject({ disposition: "REPLAYED", reservation: { id: input.reservationId, status: "CONFIRMED" } });
+    await expect(sessions.getById(session.id)).resolves.toMatchObject({ confirmedCount: 1, version: 2 });
+    await expect(reservations.listByClass(session.id, { consistentRead: true })).resolves.toMatchObject({ reservations: [{ id: input.reservationId }] });
+  });
+
+  it("leaves no partial effects and permits the same retry after eligibility recovers", async () => {
+    const session = await sessions.create({
+      ...firstClass,
+      auditId: "audit-class-recovery-001",
+      capacity: 1,
+      classDate: "2026-08-20",
+      classId: "class-recovery-001",
+      endsAt: "2026-08-20T23:00:00Z",
+      startsAt: "2026-08-20T22:00:00Z",
+    });
+    const studentId = "recovery-student-001";
+    const requestKey = "recovery-request-001";
+    const todayEpochDay = Math.floor(Date.parse("2026-08-08T00:00:00Z") / 86_400_000);
+    await adapter.put({ Item: { ...primaryKeys.userProfile(studentId), createdAt: "2026-08-01T10:00:00Z", entityType: "UserProfile", roles: ["STUDENT"], schemaVersion: 1, status: "ACTIVE", updatedAt: "2026-08-01T10:00:00Z", userId: studentId }, TableName: tableName });
+    await adapter.put({ Item: { ...primaryKeys.activeMembership(studentId), createdAt: "2026-07-01T10:00:00Z", endEpochDay: todayEpochDay - 1, entityType: "ActiveMembershipPointer", membershipId: "recovery-membership-001", schemaVersion: 1, startEpochDay: todayEpochDay - 30, status: "ACTIVE", updatedAt: "2026-07-01T10:00:00Z", userId: studentId }, TableName: tableName });
+    const input = { classId: session.id, createdAt: "2026-08-08T18:20:00Z", requestKey, reservationId: "recovery-reservation-001", studentId, todayEpochDay } as const;
+
+    await expect(bookings.reserve(input)).rejects.toMatchObject({ code: "BOOKING_CONFLICT" });
+    await expect(sessions.getById(session.id)).resolves.toMatchObject({ confirmedCount: 0, version: 1 });
+    await expect(reservations.getForStudent(session.id, studentId)).resolves.toBeUndefined();
+    const failedIdempotency = await adapter.get({ ConsistentRead: true, Key: primaryKeys.idempotency("BOOKING", studentId, requestKey), TableName: tableName });
+    expect(failedIdempotency.Item).toBeUndefined();
+
+    await adapter.put({ Item: { ...primaryKeys.activeMembership(studentId), createdAt: "2026-08-08T10:00:00Z", endEpochDay: todayEpochDay + 30, entityType: "ActiveMembershipPointer", membershipId: "recovery-membership-002", schemaVersion: 1, startEpochDay: todayEpochDay, status: "ACTIVE", updatedAt: "2026-08-08T10:00:00Z", userId: studentId }, TableName: tableName });
+    await expect(bookings.reserve(input)).resolves.toMatchObject({ disposition: "CREATED", reservation: { id: input.reservationId } });
+    await expect(sessions.getById(session.id)).resolves.toMatchObject({ confirmedCount: 1, version: 2 });
   });
 
   it("cancels atomically once, restores availability and audits the owner action", async () => {
