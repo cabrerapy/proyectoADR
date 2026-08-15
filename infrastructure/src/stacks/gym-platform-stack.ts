@@ -11,6 +11,8 @@ import type { WebHostingArtifacts } from "../hosting/web-hosting-artifacts.js";
 import { WebHosting } from "../hosting/web-hosting.js";
 import { GalleryStorage, galleryOriginalsPrefix } from "../gallery/gallery-storage.js";
 import { GalleryImageWorker } from "../gallery/gallery-image-worker.js";
+import { NotificationDelivery } from "../notifications/notification-delivery.js";
+import { ExpiryReminderSchedule } from "../notifications/expiry-reminder-schedule.js";
 
 export interface GymPlatformStackProps extends StackProps {
   readonly environmentConfig: EnvironmentConfig;
@@ -23,6 +25,8 @@ export class GymPlatformStack extends Stack {
   readonly environmentConfig: EnvironmentConfig;
   readonly galleryStorage: GalleryStorage;
   readonly galleryImageWorker: GalleryImageWorker;
+  readonly notificationDelivery: NotificationDelivery;
+  readonly expiryReminderSchedule: ExpiryReminderSchedule;
   readonly securityFoundation: SecurityFoundation;
   readonly webHosting: WebHosting;
 
@@ -61,6 +65,14 @@ export class GymPlatformStack extends Stack {
       environmentConfig: props.environmentConfig,
       securityFoundation: this.securityFoundation,
       storage: this.galleryStorage,
+    });
+    this.notificationDelivery = new NotificationDelivery(this, "NotificationDelivery", {
+      dynamoDbTable: this.dynamoDbTable,
+    });
+    this.expiryReminderSchedule = new ExpiryReminderSchedule(this, "ExpiryReminderSchedule", {
+      delivery: this.notificationDelivery,
+      dynamoDbTable: this.dynamoDbTable,
+      environmentConfig: props.environmentConfig,
     });
     this.cognitoAuth = new CognitoAuth(this, "CognitoAuth", {
       environmentConfig: props.environmentConfig,

@@ -31,4 +31,6 @@ export {
   type WebHostingArtifacts,
 } from "./hosting/web-hosting-artifacts.js";
 export { WebHosting, type WebHostingProps } from "./hosting/web-hosting.js";
+export { NotificationDelivery, type NotificationDeliveryProps } from "./notifications/notification-delivery.js";
+export { ExpiryReminderSchedule, type ExpiryReminderScheduleProps } from "./notifications/expiry-reminder-schedule.js";
 export { GymPlatformStack } from "./stacks/gym-platform-stack.js";

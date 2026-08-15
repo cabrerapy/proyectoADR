@@ -30,6 +30,25 @@ export interface NotificationPage {
   readonly notifications: readonly Notification[];
 }
 
+export interface AcquireNotificationLeaseInput {
+  readonly expectedVersion: number;
+  readonly leaseOwner: string;
+  readonly leaseUntil: string;
+  readonly notificationId: string;
+  readonly startedAt: string;
+}
+
+export interface CompleteNotificationAttemptInput {
+  readonly attemptId: string;
+  readonly completedAt: string;
+  readonly errorCode?: string;
+  readonly expectedVersion: number;
+  readonly leaseOwner: string;
+  readonly notificationId: string;
+  readonly providerMessageId?: string;
+  readonly retryAt?: string;
+}
+
 const isStatus = (value: unknown): value is NotificationStatus =>
   typeof value === "string" && NOTIFICATION_STATUSES.some((status) => status === value);
 const isType = (value: unknown): value is NotificationType =>
@@ -82,6 +101,55 @@ export class NotificationRepository {
     return { notifications, ...(Object.values(cursors).some(Boolean) ? { cursors } : {}) };
   }
 
+  async acquireLease(input: AcquireNotificationLeaseInput): Promise<Notification> {
+    const notificationId = operationId(input.notificationId, "notificationId");
+    const leaseOwner = operationId(input.leaseOwner, "leaseOwner");
+    const startedAt = operationTimestamp(input.startedAt, "startedAt");
+    const leaseUntil = operationTimestamp(input.leaseUntil, "leaseUntil");
+    if (leaseUntil <= startedAt || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) throw invalidDynamoDbInput("El lease no es válido.");
+    const key = primaryKeys.notification(notificationId);
+    try {
+      await this.document.transactWrite({ TransactItems: [{ Update: {
+        ConditionExpression: "#entityType = :notification AND #status = :pending AND #version = :expectedVersion AND #scheduledAt <= :startedAt",
+        ExpressionAttributeNames: { "#attempts": "attempts", "#entityType": "entityType", "#gsi1pk": "GSI1PK", "#gsi1sk": "GSI1SK", "#leaseOwner": "leaseOwner", "#leaseUntil": "leaseUntil", "#scheduledAt": "scheduledAt", "#status": "status", "#updatedAt": "updatedAt", "#version": "version" },
+        ExpressionAttributeValues: { ":expectedVersion": input.expectedVersion, ":increment": 1, ":leaseOwner": leaseOwner, ":leaseUntil": leaseUntil, ":nextVersion": input.expectedVersion + 1, ":notification": "Notification", ":pending": "PENDING", ":processing": "PROCESSING", ":startedAt": startedAt, ":zero": 0 },
+        Key: key,
+        TableName: this.table,
+        UpdateExpression: "SET #status = :processing, #leaseOwner = :leaseOwner, #leaseUntil = :leaseUntil, #attempts = if_not_exists(#attempts, :zero) + :increment, #updatedAt = :startedAt, #version = :nextVersion REMOVE #gsi1pk, #gsi1sk",
+      } }] });
+    } catch (error) { throw mapDynamoDbError(error); }
+    const item = await this.base.get(key, true);
+    if (item === undefined) throw invalidDynamoDbInput("La notificación no existe.");
+    return this.read(item);
+  }
+
+  async completeAttempt(input: CompleteNotificationAttemptInput): Promise<Notification> {
+    const notificationId = operationId(input.notificationId, "notificationId");
+    const leaseOwner = operationId(input.leaseOwner, "leaseOwner");
+    const attemptId = operationId(input.attemptId, "attemptId");
+    const completedAt = operationTimestamp(input.completedAt, "completedAt");
+    const retryAt = input.retryAt === undefined ? undefined : operationTimestamp(input.retryAt, "retryAt");
+    const providerMessageId = input.providerMessageId === undefined ? undefined : operationId(input.providerMessageId, "providerMessageId");
+    const errorCode = input.errorCode === undefined ? undefined : operationId(input.errorCode, "errorCode");
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1 || ((providerMessageId === undefined) === (errorCode === undefined))) throw invalidDynamoDbInput("El resultado del intento no es válido.");
+    const nextStatus: NotificationStatus = providerMessageId === undefined ? (retryAt === undefined ? "FAILED" : "PENDING") : "SENT";
+    const index = retryAt === undefined ? undefined : operationalIndexKeys.notificationPending(retryAt.slice(0, 10), shardForId(notificationId), retryAt, notificationId);
+    const names: Record<string, string> = { "#entityType": "entityType", "#errorCode": "errorCode", "#leaseOwner": "leaseOwner", "#leaseUntil": "leaseUntil", "#nextAttemptAt": "nextAttemptAt", "#providerMessageId": "providerMessageId", "#status": "status", "#updatedAt": "updatedAt", "#version": "version", "#gsi1pk": "GSI1PK", "#gsi1sk": "GSI1SK" };
+    const values: Record<string, unknown> = { ":completedAt": completedAt, ":expectedVersion": input.expectedVersion, ":leaseOwner": leaseOwner, ":nextStatus": nextStatus, ":nextVersion": input.expectedVersion + 1, ":notification": "Notification", ":processing": "PROCESSING" };
+    let update = "SET #status = :nextStatus, #updatedAt = :completedAt, #version = :nextVersion";
+    if (providerMessageId !== undefined) { values[":providerMessageId"] = providerMessageId; update += ", #providerMessageId = :providerMessageId REMOVE #errorCode, #nextAttemptAt, #leaseOwner, #leaseUntil, #gsi1pk, #gsi1sk"; }
+    else { delete names["#providerMessageId"]; values[":errorCode"] = errorCode; update += ", #errorCode = :errorCode"; if (retryAt === undefined || index === undefined) update += " REMOVE #nextAttemptAt, #leaseOwner, #leaseUntil, #gsi1pk, #gsi1sk"; else { values[":retryAt"] = retryAt; values[":gsi1pk"] = index.PK; values[":gsi1sk"] = index.SK; update += ", #nextAttemptAt = :retryAt, #gsi1pk = :gsi1pk, #gsi1sk = :gsi1sk REMOVE #leaseOwner, #leaseUntil"; } }
+    try {
+      await this.document.transactWrite({ TransactItems: [
+        { Update: { ConditionExpression: "#entityType = :notification AND #status = :processing AND #version = :expectedVersion AND #leaseOwner = :leaseOwner", ExpressionAttributeNames: names, ExpressionAttributeValues: values, Key: primaryKeys.notification(notificationId), TableName: this.table, UpdateExpression: update } },
+        { Put: { ConditionExpression: "attribute_not_exists(#pk) AND attribute_not_exists(#sk)", ExpressionAttributeNames: { "#pk": "PK", "#sk": "SK" }, Item: { PK: `NOTIFICATION#${notificationId}`, SK: `ATTEMPT#${completedAt}#${attemptId}`, attemptId, completedAt, ...(errorCode === undefined ? {} : { errorCode }), entityType: "View", ...(providerMessageId === undefined ? {} : { providerMessageId }), purpose: "NOTIFICATION_ATTEMPT", schemaVersion: CURRENT_SCHEMA_VERSION }, TableName: this.table } },
+      ] });
+    } catch (error) { throw mapDynamoDbError(error); }
+    const item = await this.base.get(primaryKeys.notification(notificationId), true);
+    if (item === undefined) throw invalidDynamoDbInput("La notificación no existe.");
+    return this.read(item);
+  }
+
   private validate(input: CreateReminderInput): Notification {
     if (input.type !== "MEMBERSHIP_EXPIRY" && input.type !== "OVERDUE_MEMBERSHIP") throw invalidDynamoDbInput("El tipo no corresponde a un recordatorio de membresía.");
     const createdAt = operationTimestamp(input.createdAt, "createdAt");
@@ -91,7 +159,8 @@ export class NotificationRepository {
 
   private read(item: DynamoDbItem): Notification {
     const version = readFiniteNumber(item.version);
+    const attempts = item.attempts === undefined ? undefined : readFiniteNumber(item.attempts);
     if (item.entityType !== "Notification" || typeof item.notificationId !== "string" || typeof item.createdAt !== "string" || typeof item.dueDate !== "string" || typeof item.membershipId !== "string" || typeof item.recipientUserId !== "string" || typeof item.scheduledAt !== "string" || typeof item.updatedAt !== "string" || version === undefined || !isStatus(item.status) || !isType(item.type)) throw invalidDynamoDbInput("La notificación persistida no es válida.");
-    return { createdAt: item.createdAt, dueDate: item.dueDate, id: item.notificationId, membershipId: item.membershipId, recipientUserId: item.recipientUserId, scheduledAt: item.scheduledAt, status: item.status, type: item.type, updatedAt: item.updatedAt, version };
+    return { ...(attempts === undefined ? {} : { attempts }), createdAt: item.createdAt, dueDate: item.dueDate, ...(typeof item.errorCode === "string" ? { errorCode: item.errorCode } : {}), id: item.notificationId, ...(typeof item.leaseOwner === "string" ? { leaseOwner: item.leaseOwner } : {}), ...(typeof item.leaseUntil === "string" ? { leaseUntil: item.leaseUntil } : {}), membershipId: item.membershipId, ...(typeof item.nextAttemptAt === "string" ? { nextAttemptAt: item.nextAttemptAt } : {}), ...(typeof item.providerMessageId === "string" ? { providerMessageId: item.providerMessageId } : {}), recipientUserId: item.recipientUserId, scheduledAt: item.scheduledAt, status: item.status, type: item.type, updatedAt: item.updatedAt, version };
   }
 }

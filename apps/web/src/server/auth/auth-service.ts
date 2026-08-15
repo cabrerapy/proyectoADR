@@ -37,6 +37,10 @@ import {
   type UserPage,
   type CreateGalleryUploadInput,
   type GalleryUploadMutationResult,
+  type CreatePhotoConsentInput,
+  type HideGalleryAssetInput,
+  type PublicGalleryPage,
+  type PublishGalleryAssetInput,
 } from "@gym-adr/data-access";
 import {
   USER_STATUSES,
@@ -53,6 +57,8 @@ import {
   type ClassType,
   type ClassSession,
   type GymSettings,
+  type GalleryAsset,
+  type PhotoConsent,
   type Reservation,
   type Trainer,
   type UserProfile,
@@ -86,6 +92,8 @@ import type {
   UpdateMembershipCommand,
   UpdateOwnProfileInput,
   GalleryUploadCommand,
+  GalleryConsentCommand,
+  GalleryPublicationCommand,
 } from "@gym-adr/validation";
 
 import { ApiError, apiErrorCodes } from "../http/api-error";
@@ -189,12 +197,26 @@ export interface GymSettingsPort {
 }
 
 export interface GalleryPort {
+  createConsent(input: CreatePhotoConsentInput): Promise<PhotoConsent>;
   createUpload(input: CreateGalleryUploadInput): Promise<GalleryUploadMutationResult>;
+  getAsset(assetId: string): Promise<GalleryAsset | undefined>;
+  hide(input: HideGalleryAssetInput): Promise<GalleryAsset>;
+  listPublic(yearMonth: string): Promise<PublicGalleryPage>;
+  publish(input: PublishGalleryAssetInput): Promise<GalleryAsset>;
 }
 
 export interface GalleryUploadResponse extends GalleryUploadIntent {
   readonly assetId: string;
   readonly disposition: "CREATED" | "REPLAYED";
+}
+
+export interface AdminDashboardView {
+  readonly links: readonly {
+    readonly description: string;
+    readonly href: string;
+    readonly label: string;
+  }[];
+  readonly role: "ADMIN" | "STAFF";
 }
 
 export interface OnboardingProfile {
@@ -620,6 +642,28 @@ export class AuthService {
   constructor(private readonly dependencies: AuthServiceDependencies) {
     this.clock = dependencies.clock ?? (() => new Date());
     this.ids = dependencies.ids ?? randomUUID;
+  }
+
+  async getAdminDashboard(request: Request): Promise<AdminDashboardView> {
+    const principal = await this.authenticate(request);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("STUDENT_PROFILE_READ_OPERATIONAL");
+      const role = principal.roles.includes("ADMIN") ? "ADMIN" : "STAFF";
+      const links = [
+        { description: "Solicitudes, estados y búsqueda paginada.", href: "/admin/students", label: "Alumnos" },
+        { description: "Planes disponibles y bajas lógicas.", href: "/admin/plans", label: "Planes" },
+        { description: "Altas, vigencia e historial por alumno.", href: "/admin/memberships", label: "Membresías" },
+        { description: "Vencimientos y alumnos atrasados.", href: "/admin/membership-reports", label: "Reportes de membresías" },
+        { description: "Registro manual, consultas y correcciones autorizadas.", href: "/admin/payments", label: "Pagos" },
+        { description: "Entrenadores y tipos de clase.", href: "/admin/class-catalog", label: "Catálogo de clases" },
+        { description: "Calendario, cupos y cancelaciones.", href: "/admin/class-sessions", label: "Sesiones" },
+        { description: "Carga, consentimiento, publicación y ocultamiento.", href: "/admin/gallery", label: "Galería" },
+      ] as const;
+      return { links, role };
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible abrir el panel administrativo.");
+    }
   }
 
   beginLogin(request: Request): Response {
@@ -1589,6 +1633,77 @@ export class AuthService {
         throw new ApiError(409, apiErrorCodes.conflict, "La clave idempotente ya fue utilizada con otra imagen.");
       }
       throw new ApiError(502, apiErrorCodes.internalError, "No fue posible preparar la carga de la imagen.");
+    }
+  }
+
+  async getAdminGalleryAsset(request: Request, assetId: string): Promise<GalleryAsset> {
+    const principal = await this.authenticate(request);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("GALLERY_UPLOAD_HIDE");
+      const asset = await this.galleryRepository().getAsset(assetId);
+      if (asset === undefined) throw new ApiError(404, apiErrorCodes.notFound, "No se encontró la imagen solicitada.");
+      return asset;
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible consultar la imagen.");
+    }
+  }
+
+  async createGalleryConsent(request: Request, input: GalleryConsentCommand): Promise<PhotoConsent> {
+    this.assertSameOrigin(request);
+    const principal = await this.authenticate(request);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("GALLERY_PUBLISH_CONSENT");
+      return await this.galleryRepository().createConsent({
+        ...input,
+        consentId: this.ids(),
+        createdAt: this.clock().toISOString(),
+      });
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(409, apiErrorCodes.conflict, "No fue posible registrar el consentimiento.");
+    }
+  }
+
+  async changeGalleryPublication(
+    request: Request,
+    assetId: string,
+    input: GalleryPublicationCommand,
+  ): Promise<GalleryAsset> {
+    this.assertSameOrigin(request);
+    const principal = await this.authenticate(request);
+    try {
+      const scope = new AuthorizedRepositoryScope(principalFromProfile(principal));
+      if (input.operation === "HIDE") {
+        scope.require("GALLERY_UPLOAD_HIDE");
+        return await this.galleryRepository().hide({
+          assetId,
+          expectedVersion: input.expectedVersion,
+          hiddenAt: this.clock().toISOString(),
+        });
+      }
+      scope.require("GALLERY_PUBLISH_CONSENT");
+      return await this.galleryRepository().publish({
+        assetId,
+        consentId: input.consentId ?? "",
+        expectedVersion: input.expectedVersion,
+        publicObjectKey: input.publicObjectKey ?? "",
+        publishedAt: this.clock().toISOString(),
+      });
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(409, apiErrorCodes.conflict, "La imagen cambió o no tiene consentimiento vigente.");
+    }
+  }
+
+  async listPublicGallery(yearMonth: string): Promise<PublicGalleryPage> {
+    try {
+      return await this.galleryRepository().listPublic(yearMonth);
+    } catch {
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible consultar la galería.");
     }
   }
 

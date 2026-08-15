@@ -52,6 +52,10 @@ describe.skipIf(!enabled)("TASK-017 repositories with DynamoDB Local", () => {
     expect(page.assets).toEqual([{ assetId: "asset-001", publicObjectKey: "public/watermarked/asset-001.webp", publishedAt: "2026-08-08T12:15:00Z" }]);
     expect(JSON.stringify(page)).not.toContain("private/originals");
 
+    await gallery.hide({ assetId: "asset-001", expectedVersion: 3, hiddenAt: "2026-08-08T12:16:00Z" });
+    await expect(gallery.listPublic("2026-08")).resolves.toEqual({ assets: [] });
+    await expect(gallery.getAsset("asset-001")).resolves.toMatchObject({ status: "HIDDEN", version: 4 });
+
     await gallery.createAsset({ assetId: "asset-002", createdAt: "2026-08-08T12:20:00Z", createdBy: "admin-001", originalObjectKey: "private/originals/asset-002.jpg" });
     await gallery.createConsent({ assetId: "asset-002", consentId: "consent-002", createdAt: "2026-08-08T12:21:00Z", grantedBy: "student-002", status: "REVOKED" });
     await adapter.transactWrite({ TransactItems: [{ Update: { ExpressionAttributeNames: { "#status": "status", "#version": "version" }, ExpressionAttributeValues: { ":nextVersion": 2, ":ready": "READY" }, Key: primaryKeys.galleryAsset("asset-002"), TableName: tableName, UpdateExpression: "SET #status = :ready, #version = :nextVersion" } }] });
@@ -103,6 +107,11 @@ describe.skipIf(!enabled)("TASK-017 repositories with DynamoDB Local", () => {
     const pending = await notifications.listPending("2026-08-08");
     expect(pending.notifications.map(({ id }) => id)).toContain("notification-001");
     await expect(notifications.createReminder({ ...input, recipientUserId: "student-002" })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    const leased = await notifications.acquireLease({ expectedVersion: 1, leaseOwner: "worker-001", leaseUntil: "2026-08-08T13:10:00Z", notificationId: input.notificationId, startedAt: input.scheduledAt });
+    expect(leased).toMatchObject({ attempts: 1, status: "PROCESSING", version: 2 });
+    await expect(notifications.acquireLease({ expectedVersion: 1, leaseOwner: "worker-002", leaseUntil: "2026-08-08T13:10:00Z", notificationId: input.notificationId, startedAt: input.scheduledAt })).rejects.toMatchObject({ code: "TRANSACTION_CANCELLED" });
+    const retry = await notifications.completeAttempt({ attemptId: "attempt-001", completedAt: "2026-08-08T13:06:00Z", errorCode: "TRANSIENT", expectedVersion: 2, leaseOwner: "worker-001", notificationId: input.notificationId, retryAt: "2026-08-08T13:08:00Z" });
+    expect(retry).toMatchObject({ errorCode: "TRANSIENT", nextAttemptAt: "2026-08-08T13:08:00Z", status: "PENDING", version: 3 });
   });
 
   it("uses conditional versions for settings and append-only audit queries", async () => {

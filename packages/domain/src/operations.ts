@@ -47,10 +47,16 @@ export const NOTIFICATION_TYPES = [
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
 
 export interface Notification {
+  readonly attempts?: number;
   readonly createdAt: string;
   readonly dueDate: string;
+  readonly errorCode?: string;
   readonly id: EntityId;
+  readonly leaseOwner?: string;
+  readonly leaseUntil?: string;
   readonly membershipId: EntityId;
+  readonly nextAttemptAt?: string;
+  readonly providerMessageId?: string;
   readonly recipientUserId: EntityId;
   readonly scheduledAt: string;
   readonly status: NotificationStatus;

@@ -7,7 +7,7 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   reporter: "line",
   use: {
-    baseURL: "http://127.0.0.1:3100",
+    baseURL: process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:3100",
     trace: "retain-on-failure",
     viewport: { width: 360, height: 800 },
   },

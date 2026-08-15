@@ -299,6 +299,7 @@ describe("OAuth session service", () => {
       issueDownload: vi.fn(async () => "/signed-download"),
     };
     const galleryPort: GalleryPort = {
+      createConsent: vi.fn(async (input) => ({ assetId: input.assetId, createdAt: input.createdAt, grantedBy: input.grantedBy, id: input.consentId, status: input.status, ...(input.validUntil === undefined ? {} : { validUntil: input.validUntil }) })),
       createUpload: vi.fn(async (input) => ({
         asset: {
           createdAt: input.createdAt,
@@ -311,6 +312,10 @@ describe("OAuth session service", () => {
         } satisfies GalleryAsset,
         disposition: "CREATED" as const,
       })),
+      getAsset: vi.fn(async (assetId) => ({ createdAt: "2026-08-08T12:00:00Z", createdBy: "admin", id: assetId, originalObjectKey: `gallery/originals/${assetId}.jpg`, publicObjectKey: `gallery/derived/${assetId}/1600.webp`, status: "READY", updatedAt: "2026-08-08T12:10:00Z", version: 2 } satisfies GalleryAsset)),
+      hide: vi.fn(async (input) => ({ createdAt: "2026-08-08T12:00:00Z", createdBy: "admin", id: input.assetId, originalObjectKey: `gallery/originals/${input.assetId}.jpg`, status: "HIDDEN", updatedAt: input.hiddenAt, version: input.expectedVersion + 1 } satisfies GalleryAsset)),
+      listPublic: vi.fn(async () => ({ assets: [] })),
+      publish: vi.fn(async (input) => ({ consentId: input.consentId, createdAt: "2026-08-08T12:00:00Z", createdBy: "admin", id: input.assetId, originalObjectKey: `gallery/originals/${input.assetId}.jpg`, publicObjectKey: input.publicObjectKey, publishedAt: input.publishedAt, status: "PUBLISHED", updatedAt: input.publishedAt, version: input.expectedVersion + 1 } satisfies GalleryAsset)),
     };
     const galleryUploadPort: GalleryUploadSignerPort = {
       issue: vi.fn(async (assetId, key, input) => ({
@@ -1249,6 +1254,22 @@ describe("OAuth session service", () => {
     await expect(service.createGalleryUpload(new Request("https://app.example.com/api/v1/admin/gallery/uploads", {
       headers: { "idempotency-key": "gallery-request-005", origin: config.appBaseUrl }, method: "POST",
     }), command)).rejects.toMatchObject({ code: "AUTHENTICATION_REQUIRED", status: 401 });
+  });
+
+  it("exposes the integrated admin dashboard only to active staff and admins", async () => {
+    const { completed, service, userPort } = setup();
+    const actor = { ...identity, createdAt: "2026-08-14T12:00:00Z", userId: "dashboard-user" };
+    await userPort.createPending(actor);
+    const request = new Request("https://app.example.com/api/v1/admin/dashboard", { headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token` } });
+    const profile = { createdAt: actor.createdAt, displayName: "Operador", email: actor.email, emailVerified: true, id: actor.userId, roles: ["STAFF"] as const, status: "ACTIVE" as const, updatedAt: actor.createdAt, version: 2 };
+    completed.set(actor.userId, profile);
+    await expect(service.getAdminDashboard(request)).resolves.toMatchObject({ role: "STAFF", links: expect.arrayContaining([expect.objectContaining({ href: "/admin/gallery" })]) });
+    completed.set(actor.userId, { ...profile, roles: ["ADMIN"] });
+    await expect(service.getAdminDashboard(request)).resolves.toMatchObject({ role: "ADMIN" });
+    completed.set(actor.userId, { ...profile, roles: ["STUDENT"] });
+    await expect(service.getAdminDashboard(request)).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+    completed.set(actor.userId, { ...profile, status: "SUSPENDED" });
+    await expect(service.getAdminDashboard(request)).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
   });
 
   it("lists only the authenticated student's classes and rejects a foreign reservation cursor", async () => {

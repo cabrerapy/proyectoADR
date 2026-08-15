@@ -1,0 +1,14 @@
+import { describe, expect, it, vi } from "vitest";
+import type { Notification } from "@gym-adr/domain";
+import { deliverNotification, EmailDeliveryError, renderNotification } from "./notification-delivery";
+
+const pending: Notification = { createdAt: "2026-08-14T12:00:00Z", dueDate: "2026-08-19", id: "notification-001", membershipId: "membership-001", recipientUserId: "student-001", scheduledAt: "2026-08-14T12:00:00Z", status: "PENDING", type: "MEMBERSHIP_EXPIRY", updatedAt: "2026-08-14T12:00:00Z", version: 1 };
+const repository = () => ({
+  acquireLease: vi.fn(async () => ({ ...pending, attempts: 1, leaseOwner: "worker-001", leaseUntil: "2026-08-14T12:05:00Z", status: "PROCESSING" as const, version: 2 })),
+  completeAttempt: vi.fn(async (input) => ({ ...pending, ...(input.errorCode === undefined ? { providerMessageId: input.providerMessageId, status: "SENT" as const } : { errorCode: input.errorCode, status: input.retryAt === undefined ? "FAILED" as const : "PENDING" as const }), version: 3 })),
+});
+describe("notification delivery", () => {
+  it("renders a Spanish template without identifiers or secrets", () => { const message = renderNotification(pending, "STUDENT@EXAMPLE.COM"); expect(message).toMatchObject({ subject: expect.stringContaining("membresía"), to: "student@example.com" }); expect(JSON.stringify(message)).not.toContain("student-001"); });
+  it("leases and records a successful provider id", async () => { const repo = repository(); await deliverNotification({ attemptId: "attempt-001", leaseOwner: "worker-001", notification: pending, now: new Date("2026-08-14T12:00:00Z"), provider: { send: vi.fn(async () => ({ messageId: "provider-001" })) }, recipientEmail: "student@example.com", repository: repo }); expect(repo.completeAttempt).toHaveBeenCalledWith(expect.objectContaining({ providerMessageId: "provider-001" })); });
+  it("retries transient errors and persists sanitized terminal bounces", async () => { const transient = repository(); await deliverNotification({ attemptId: "attempt-002", leaseOwner: "worker-001", notification: pending, now: new Date("2026-08-14T12:00:00Z"), provider: { send: vi.fn(async () => { throw new EmailDeliveryError("TRANSIENT", true); }) }, recipientEmail: "student@example.com", repository: transient }); expect(transient.completeAttempt).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "TRANSIENT", retryAt: expect.any(String) })); const bounced = repository(); await deliverNotification({ attemptId: "attempt-003", leaseOwner: "worker-001", notification: pending, now: new Date("2026-08-14T12:00:00Z"), provider: { send: vi.fn(async () => { throw new EmailDeliveryError("BOUNCED", false); }) }, recipientEmail: "student@example.com", repository: bounced }); expect(bounced.completeAttempt).toHaveBeenCalledWith(expect.not.objectContaining({ retryAt: expect.anything() })); });
+});

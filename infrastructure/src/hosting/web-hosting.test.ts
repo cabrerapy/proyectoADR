@@ -71,7 +71,7 @@ describe("OpenNext web hosting", () => {
   it("creates isolated server and image Lambda functions", () => {
     const template = synthesize();
 
-    template.resourceCountIs("AWS::Lambda::Function", 4);
+    template.resourceCountIs("AWS::Lambda::Function", 5);
     template.hasResourceProperties("AWS::Lambda::Function", {
       Description: "OpenNext server (development)",
       Handler: "index.handler",

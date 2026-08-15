@@ -25,6 +25,13 @@ const workspaceRules = new Map([
       allowed: ["@gym-adr/data-access"],
     },
   ],
+  [
+    "@gym-adr/notification-worker",
+    {
+      directory: "packages/notification-worker",
+      allowed: ["@gym-adr/data-access", "@gym-adr/domain"],
+    },
+  ],
   ["@gym-adr/infrastructure", { directory: "infrastructure", allowed: [] }],
 ]);
 

@@ -84,6 +84,12 @@ export interface PublishGalleryAssetInput {
   readonly publishedAt: string;
 }
 
+export interface HideGalleryAssetInput {
+  readonly assetId: string;
+  readonly expectedVersion: number;
+  readonly hiddenAt: string;
+}
+
 export interface PublicGalleryItem {
   readonly assetId: string;
   readonly publicObjectKey: string;
@@ -341,6 +347,89 @@ export class GalleryRepository {
       throw mapDynamoDbError(error);
     }
     return next;
+  }
+
+  async hide(input: HideGalleryAssetInput): Promise<GalleryAsset> {
+    const assetId = operationId(input.assetId, "assetId");
+    const hiddenAt = operationTimestamp(input.hiddenAt, "hiddenAt");
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+      throw invalidDynamoDbInput("expectedVersion no es válida.");
+    }
+    const currentItem = await this.base.get(primaryKeys.galleryAsset(assetId), true);
+    if (currentItem === undefined) throw invalidDynamoDbInput("El activo de galería no existe.");
+    const current = this.readAsset(currentItem);
+    if (current.status === "HIDDEN" && current.version === input.expectedVersion + 1) return current;
+    if (
+      current.status !== "PUBLISHED" ||
+      current.version !== input.expectedVersion ||
+      current.publishedAt === undefined
+    ) {
+      throw invalidDynamoDbInput("El activo no está publicado o su versión cambió.");
+    }
+    const publicKey = primaryKeys.publishedGalleryAsset(
+      current.publishedAt.slice(0, 7),
+      shardForId(assetId),
+      current.publishedAt,
+      assetId,
+    );
+    try {
+      await this.document.transactWrite({
+        TransactItems: [
+          {
+            Update: {
+              ConditionExpression:
+                "#entityType = :asset AND #status = :published AND #version = :expectedVersion AND #publishedAt = :publishedAt",
+              ExpressionAttributeNames: {
+                "#entityType": "entityType",
+                "#publishedAt": "publishedAt",
+                "#status": "status",
+                "#updatedAt": "updatedAt",
+                "#version": "version",
+              },
+              ExpressionAttributeValues: {
+                ":asset": "GalleryAsset",
+                ":expectedVersion": input.expectedVersion,
+                ":hidden": "HIDDEN",
+                ":hiddenAt": hiddenAt,
+                ":nextVersion": input.expectedVersion + 1,
+                ":published": "PUBLISHED",
+                ":publishedAt": current.publishedAt,
+              },
+              Key: primaryKeys.galleryAsset(assetId),
+              TableName: this.table,
+              UpdateExpression:
+                "SET #status = :hidden, #updatedAt = :hiddenAt, #version = :nextVersion",
+            },
+          },
+          {
+            Delete: {
+              ConditionExpression:
+                "#entityType = :view AND #purpose = :purpose AND #assetId = :assetId",
+              ExpressionAttributeNames: {
+                "#assetId": "assetId",
+                "#entityType": "entityType",
+                "#purpose": "purpose",
+              },
+              ExpressionAttributeValues: {
+                ":assetId": assetId,
+                ":purpose": "PUBLIC_GALLERY",
+                ":view": "View",
+              },
+              Key: publicKey,
+              TableName: this.table,
+            },
+          },
+        ],
+      });
+    } catch (error) {
+      throw mapDynamoDbError(error);
+    }
+    return {
+      ...current,
+      status: "HIDDEN",
+      updatedAt: hiddenAt,
+      version: input.expectedVersion + 1,
+    };
   }
 
   async listPublic(yearMonth: string, options: { readonly cursors?: Readonly<Record<string, DynamoDbKey | undefined>>; readonly limitPerShard?: number } = {}): Promise<PublicGalleryPage> {
