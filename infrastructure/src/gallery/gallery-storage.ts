@@ -15,6 +15,7 @@ import type { EnvironmentConfig } from "../config/environment.js";
 import type { SecurityFoundation } from "../foundation/security-foundation.js";
 
 export const galleryOriginalsPrefix = "gallery/originals/";
+export const galleryDerivativesPrefix = "gallery/derived/";
 
 export interface GalleryStorageProps {
   readonly environmentConfig: EnvironmentConfig;
@@ -23,6 +24,7 @@ export interface GalleryStorageProps {
 
 export class GalleryStorage extends Construct {
   readonly deadLetterQueue: Queue;
+  readonly derivativesBucket: Bucket;
   readonly originalsBucket: Bucket;
   readonly processingQueue: Queue;
 
@@ -72,6 +74,16 @@ export class GalleryStorage extends Construct {
         abortIncompleteMultipartUploadAfter: Duration.days(1),
         id: "AbortIncompleteUploads",
       }],
+      objectOwnership: ObjectOwnership.BUCKET_OWNER_ENFORCED,
+      removalPolicy,
+      versioned: true,
+    });
+    this.derivativesBucket = new Bucket(this, "DerivativesBucket", {
+      blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
+      bucketKeyEnabled: true,
+      encryption: BucketEncryption.KMS,
+      encryptionKey: props.securityFoundation.encryptionKey,
+      enforceSSL: true,
       objectOwnership: ObjectOwnership.BUCKET_OWNER_ENFORCED,
       removalPolicy,
       versioned: true,

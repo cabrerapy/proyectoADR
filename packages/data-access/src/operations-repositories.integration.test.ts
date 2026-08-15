@@ -76,6 +76,25 @@ describe.skipIf(!enabled)("TASK-017 repositories with DynamoDB Local", () => {
       .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
   });
 
+  it("claims image processing conditionally and replays completed or permanent outcomes", async () => {
+    await gallery.createAsset({ assetId: "asset-process-001", createdAt: "2026-08-14T13:00:00Z", createdBy: "admin-001", originalObjectKey: "gallery/originals/asset-process-001.jpg" });
+    const claim = { assetId: "asset-process-001", originalObjectKey: "gallery/originals/asset-process-001.jpg", processedAt: "2026-08-14T13:01:00Z", sourceIdentity: "source-001" } as const;
+    const competing = await Promise.allSettled([gallery.startProcessing(claim), gallery.startProcessing(claim)]);
+    expect(competing.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    const retry = await gallery.startProcessing({ ...claim, processedAt: "2026-08-14T13:02:00Z" });
+    expect(retry).toEqual({ disposition: "PROCESS", processingVersion: 3 });
+    await gallery.completeProcessing({ assetId: claim.assetId, derivativeObjectKeys: ["gallery/derived/asset-process-001/480.webp", "gallery/derived/asset-process-001/960.webp"], expectedVersion: 3, processedAt: "2026-08-14T13:03:00Z", sourceIdentity: claim.sourceIdentity });
+    await expect(gallery.startProcessing({ ...claim, processedAt: "2026-08-14T13:04:00Z" })).resolves.toEqual({ disposition: "READY" });
+    expect(await gallery.getAsset(claim.assetId)).toMatchObject({ publicObjectKey: "gallery/derived/asset-process-001/960.webp", status: "READY", version: 4 });
+
+    await gallery.createAsset({ assetId: "asset-process-002", createdAt: "2026-08-14T13:05:00Z", createdBy: "admin-001", originalObjectKey: "gallery/originals/asset-process-002.png" });
+    const failedClaim = { assetId: "asset-process-002", originalObjectKey: "gallery/originals/asset-process-002.png", processedAt: "2026-08-14T13:06:00Z", sourceIdentity: "source-002" } as const;
+    const started = await gallery.startProcessing(failedClaim);
+    await gallery.failProcessing({ assetId: failedClaim.assetId, expectedVersion: started.processingVersion ?? 0, failureCode: "CORRUPT_IMAGE", processedAt: "2026-08-14T13:07:00Z", sourceIdentity: failedClaim.sourceIdentity });
+    await expect(gallery.startProcessing({ ...failedClaim, processedAt: "2026-08-14T13:08:00Z" })).resolves.toEqual({ disposition: "PERMANENT_FAILURE" });
+    expect(await gallery.getAsset(failedClaim.assetId)).toMatchObject({ status: "FAILED", version: 3 });
+  });
+
   it("deduplicates reminders and lists pending work through GSI1", async () => {
     const input = { createdAt: "2026-08-08T13:00:00Z", dueDate: "2026-08-13", membershipId: "membership-001", notificationId: "notification-001", recipientUserId: "student-001", scheduledAt: "2026-08-08T13:05:00Z", type: "MEMBERSHIP_EXPIRY" as const };
     const first = await notifications.createReminder(input);

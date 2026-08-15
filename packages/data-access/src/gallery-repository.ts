@@ -39,6 +39,34 @@ export interface GalleryUploadMutationResult {
   readonly disposition: "CREATED" | "REPLAYED";
 }
 
+export interface StartGalleryProcessingInput {
+  readonly assetId: string;
+  readonly originalObjectKey: string;
+  readonly processedAt: string;
+  readonly sourceIdentity: string;
+}
+
+export interface StartGalleryProcessingResult {
+  readonly disposition: "PROCESS" | "READY" | "PERMANENT_FAILURE";
+  readonly processingVersion?: number;
+}
+
+export interface CompleteGalleryProcessingInput {
+  readonly assetId: string;
+  readonly derivativeObjectKeys: readonly string[];
+  readonly expectedVersion: number;
+  readonly processedAt: string;
+  readonly sourceIdentity: string;
+}
+
+export interface FailGalleryProcessingInput {
+  readonly assetId: string;
+  readonly expectedVersion: number;
+  readonly failureCode: string;
+  readonly processedAt: string;
+  readonly sourceIdentity: string;
+}
+
 export interface CreatePhotoConsentInput {
   readonly assetId: string;
   readonly consentId: string;
@@ -156,6 +184,82 @@ export class GalleryRepository {
       TableName: this.table,
     });
     return asset;
+  }
+
+  async startProcessing(input: StartGalleryProcessingInput): Promise<StartGalleryProcessingResult> {
+    const assetId = operationId(input.assetId, "assetId");
+    const originalObjectKey = objectKey(input.originalObjectKey, "originalObjectKey");
+    const processedAt = operationTimestamp(input.processedAt, "processedAt");
+    const sourceIdentity = operationId(input.sourceIdentity, "sourceIdentity");
+    const key = primaryKeys.galleryAsset(assetId);
+    const currentItem = await this.base.get(key, true);
+    if (currentItem === undefined) throw invalidDynamoDbInput("El activo de galería no existe.");
+    const current = this.readAsset(currentItem);
+    if (current.originalObjectKey !== originalObjectKey) throw invalidDynamoDbInput("El original no corresponde al activo de galería.");
+    if (current.status === "READY") {
+      if (currentItem.sourceIdentity !== sourceIdentity) throw invalidDynamoDbInput("El activo fue procesado desde otro original.");
+      return { disposition: "READY" };
+    }
+    if (current.status === "FAILED") {
+      if (currentItem.sourceIdentity !== sourceIdentity) throw invalidDynamoDbInput("El fallo corresponde a otro original.");
+      return { disposition: "PERMANENT_FAILURE" };
+    }
+    if (current.status !== "UPLOADING" && current.status !== "PROCESSING") throw invalidDynamoDbInput("El activo no admite procesamiento.");
+    const nextVersion = current.version + 1;
+    try {
+      await this.document.transactWrite({ TransactItems: [{ Update: {
+        ConditionExpression: "#entityType = :asset AND #version = :expectedVersion AND (#status = :uploading OR (#status = :processing AND #sourceIdentity = :sourceIdentity))",
+        ExpressionAttributeNames: { "#entityType": "entityType", "#failureCode": "failureCode", "#sourceIdentity": "sourceIdentity", "#status": "status", "#updatedAt": "updatedAt", "#version": "version" },
+        ExpressionAttributeValues: { ":asset": "GalleryAsset", ":expectedVersion": current.version, ":nextVersion": nextVersion, ":processedAt": processedAt, ":processing": "PROCESSING", ":sourceIdentity": sourceIdentity, ":uploading": "UPLOADING" },
+        Key: key,
+        TableName: this.table,
+        UpdateExpression: "SET #status = :processing, #sourceIdentity = :sourceIdentity, #updatedAt = :processedAt, #version = :nextVersion REMOVE #failureCode",
+      } }] });
+    } catch (error) {
+      throw mapDynamoDbError(error);
+    }
+    return { disposition: "PROCESS", processingVersion: nextVersion };
+  }
+
+  async completeProcessing(input: CompleteGalleryProcessingInput): Promise<void> {
+    const assetId = operationId(input.assetId, "assetId");
+    const processedAt = operationTimestamp(input.processedAt, "processedAt");
+    const sourceIdentity = operationId(input.sourceIdentity, "sourceIdentity");
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) throw invalidDynamoDbInput("expectedVersion no es válida.");
+    if (input.derivativeObjectKeys.length < 1 || input.derivativeObjectKeys.length > 8) throw invalidDynamoDbInput("Los derivados no son válidos.");
+    const derivativeObjectKeys = input.derivativeObjectKeys.map((key) => objectKey(key, "derivativeObjectKey"));
+    try {
+      await this.document.transactWrite({ TransactItems: [{ Update: {
+        ConditionExpression: "#entityType = :asset AND #status = :processing AND #version = :expectedVersion AND #sourceIdentity = :sourceIdentity",
+        ExpressionAttributeNames: { "#derivativeObjectKeys": "derivativeObjectKeys", "#entityType": "entityType", "#failureCode": "failureCode", "#publicObjectKey": "publicObjectKey", "#sourceIdentity": "sourceIdentity", "#status": "status", "#updatedAt": "updatedAt", "#version": "version" },
+        ExpressionAttributeValues: { ":asset": "GalleryAsset", ":derivativeObjectKeys": derivativeObjectKeys, ":expectedVersion": input.expectedVersion, ":nextVersion": input.expectedVersion + 1, ":processedAt": processedAt, ":processing": "PROCESSING", ":publicObjectKey": derivativeObjectKeys.at(-1), ":ready": "READY", ":sourceIdentity": sourceIdentity },
+        Key: primaryKeys.galleryAsset(assetId),
+        TableName: this.table,
+        UpdateExpression: "SET #status = :ready, #derivativeObjectKeys = :derivativeObjectKeys, #publicObjectKey = :publicObjectKey, #updatedAt = :processedAt, #version = :nextVersion REMOVE #failureCode",
+      } }] });
+    } catch (error) {
+      throw mapDynamoDbError(error);
+    }
+  }
+
+  async failProcessing(input: FailGalleryProcessingInput): Promise<void> {
+    const assetId = operationId(input.assetId, "assetId");
+    const failureCode = operationId(input.failureCode, "failureCode");
+    const processedAt = operationTimestamp(input.processedAt, "processedAt");
+    const sourceIdentity = operationId(input.sourceIdentity, "sourceIdentity");
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) throw invalidDynamoDbInput("expectedVersion no es válida.");
+    try {
+      await this.document.transactWrite({ TransactItems: [{ Update: {
+        ConditionExpression: "#entityType = :asset AND #status = :processing AND #version = :expectedVersion AND #sourceIdentity = :sourceIdentity",
+        ExpressionAttributeNames: { "#entityType": "entityType", "#failureCode": "failureCode", "#sourceIdentity": "sourceIdentity", "#status": "status", "#updatedAt": "updatedAt", "#version": "version" },
+        ExpressionAttributeValues: { ":asset": "GalleryAsset", ":expectedVersion": input.expectedVersion, ":failed": "FAILED", ":failureCode": failureCode, ":nextVersion": input.expectedVersion + 1, ":processedAt": processedAt, ":processing": "PROCESSING", ":sourceIdentity": sourceIdentity },
+        Key: primaryKeys.galleryAsset(assetId),
+        TableName: this.table,
+        UpdateExpression: "SET #status = :failed, #failureCode = :failureCode, #updatedAt = :processedAt, #version = :nextVersion",
+      } }] });
+    } catch (error) {
+      throw mapDynamoDbError(error);
+    }
   }
 
   async createConsent(input: CreatePhotoConsentInput): Promise<PhotoConsent> {

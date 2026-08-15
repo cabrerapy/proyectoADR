@@ -10,6 +10,7 @@ import { SecurityFoundation } from "../foundation/security-foundation.js";
 import type { WebHostingArtifacts } from "../hosting/web-hosting-artifacts.js";
 import { WebHosting } from "../hosting/web-hosting.js";
 import { GalleryStorage, galleryOriginalsPrefix } from "../gallery/gallery-storage.js";
+import { GalleryImageWorker } from "../gallery/gallery-image-worker.js";
 
 export interface GymPlatformStackProps extends StackProps {
   readonly environmentConfig: EnvironmentConfig;
@@ -21,6 +22,7 @@ export class GymPlatformStack extends Stack {
   readonly dynamoDbTable: DynamoDbTable;
   readonly environmentConfig: EnvironmentConfig;
   readonly galleryStorage: GalleryStorage;
+  readonly galleryImageWorker: GalleryImageWorker;
   readonly securityFoundation: SecurityFoundation;
   readonly webHosting: WebHosting;
 
@@ -53,6 +55,12 @@ export class GymPlatformStack extends Stack {
     this.galleryStorage = new GalleryStorage(this, "GalleryStorage", {
       environmentConfig: props.environmentConfig,
       securityFoundation: this.securityFoundation,
+    });
+    this.galleryImageWorker = new GalleryImageWorker(this, "GalleryImageWorker", {
+      dynamoDbTable: this.dynamoDbTable,
+      environmentConfig: props.environmentConfig,
+      securityFoundation: this.securityFoundation,
+      storage: this.galleryStorage,
     });
     this.cognitoAuth = new CognitoAuth(this, "CognitoAuth", {
       environmentConfig: props.environmentConfig,

@@ -18,6 +18,13 @@ const workspaceRules = new Map([
       allowed: ["@gym-adr/domain", "@gym-adr/shared"],
     },
   ],
+  [
+    "@gym-adr/image-worker",
+    {
+      directory: "packages/image-worker",
+      allowed: ["@gym-adr/data-access"],
+    },
+  ],
   ["@gym-adr/infrastructure", { directory: "infrastructure", allowed: [] }],
 ]);
 

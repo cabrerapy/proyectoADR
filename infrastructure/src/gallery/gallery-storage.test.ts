@@ -22,6 +22,7 @@ const synthesize = () => {
 describe("private gallery storage", () => {
   it("creates a private versioned KMS bucket with bounded browser uploads", () => {
     const template = synthesize();
+    template.resourceCountIs("AWS::S3::Bucket", 3);
     template.hasResourceProperties("AWS::S3::Bucket", {
       BucketEncryption: { ServerSideEncryptionConfiguration: [Match.objectLike({
         BucketKeyEnabled: true,
@@ -46,6 +47,14 @@ describe("private gallery storage", () => {
         Event: "s3:ObjectCreated:*",
         Filter: { S3Key: { Rules: [{ Name: "prefix", Value: "gallery/originals/" }] } },
       })] },
+    });
+  });
+
+  it("creates a separate private encrypted derivative bucket", () => {
+    synthesize().hasResourceProperties("AWS::S3::Bucket", {
+      BucketEncryption: { ServerSideEncryptionConfiguration: [Match.objectLike({ ServerSideEncryptionByDefault: { SSEAlgorithm: "aws:kms" } })] },
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true },
+      VersioningConfiguration: { Status: "Enabled" },
     });
   });
 
