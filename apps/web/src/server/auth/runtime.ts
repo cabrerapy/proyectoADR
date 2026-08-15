@@ -8,6 +8,7 @@ import {
   createDynamoDbAdapter,
   BookingRepository,
   ClassSessionRepository,
+  GalleryRepository,
   GymSettingsRepository,
   MembershipRepository,
   MembershipPlanRepository,
@@ -26,6 +27,10 @@ import {
   LocalReceiptUploadSigner,
   S3ReceiptUploadSigner,
 } from "../payments/receipt-upload";
+import {
+  LocalGalleryUploadSigner,
+  S3GalleryUploadSigner,
+} from "../gallery/gallery-upload";
 
 let servicePromise: Promise<AuthService> | undefined;
 const limiter = new FixedWindowRateLimiter();
@@ -122,11 +127,22 @@ const createService = async (): Promise<AuthService> => {
         }
         return new S3ReceiptUploadSigner(new S3Client({ region }), bucket);
       })();
+  const galleryUploads = config.environment === "local"
+    ? new LocalGalleryUploadSigner()
+    : (() => {
+        const bucket = process.env.GALLERY_ORIGINALS_BUCKET_NAME;
+        if (bucket === undefined || region === undefined) {
+          throw new Error("Missing private gallery bucket configuration");
+        }
+        return new S3GalleryUploadSigner(new S3Client({ region }), bucket);
+      })();
   return new AuthService({
     bookings: new BookingRepository(adapter, tableName),
     catalog: new SchedulingCatalogRepository(adapter, tableName),
     classSessions: new ClassSessionRepository(adapter, tableName),
     config,
+    gallery: new GalleryRepository(adapter, tableName),
+    galleryUploads,
     rateLimiter: limiter,
     memberships: new MembershipRepository(adapter, tableName),
     payments: new PaymentRepository(adapter, tableName),

@@ -35,6 +35,8 @@ import {
   type UpdateMembershipInput,
   type UpdateOwnUserProfileInput,
   type UserPage,
+  type CreateGalleryUploadInput,
+  type GalleryUploadMutationResult,
 } from "@gym-adr/data-access";
 import {
   USER_STATUSES,
@@ -83,6 +85,7 @@ import type {
   UpdateSchedulingCatalogCommand,
   UpdateMembershipCommand,
   UpdateOwnProfileInput,
+  GalleryUploadCommand,
 } from "@gym-adr/validation";
 
 import { ApiError, apiErrorCodes } from "../http/api-error";
@@ -100,6 +103,7 @@ import {
   principalFromProfile,
 } from "./repository-scope";
 import type { ReceiptUpload, ReceiptUploadPort } from "../payments/receipt-upload";
+import type { GalleryUploadIntent, GalleryUploadSignerPort } from "../gallery/gallery-upload";
 
 export interface PendingUserPort {
   createPending(input: {
@@ -182,6 +186,15 @@ export interface BookingPort {
 
 export interface GymSettingsPort {
   get(): Promise<GymSettings | undefined>;
+}
+
+export interface GalleryPort {
+  createUpload(input: CreateGalleryUploadInput): Promise<GalleryUploadMutationResult>;
+}
+
+export interface GalleryUploadResponse extends GalleryUploadIntent {
+  readonly assetId: string;
+  readonly disposition: "CREATED" | "REPLAYED";
 }
 
 export interface OnboardingProfile {
@@ -282,6 +295,8 @@ export interface AuthServiceDependencies {
   readonly config: AuthConfig;
   readonly catalog?: SchedulingCatalogPort;
   readonly classSessions?: ClassSessionPort;
+  readonly gallery?: GalleryPort;
+  readonly galleryUploads?: GalleryUploadSignerPort;
   readonly ids?: () => string;
   readonly settings?: GymSettingsPort;
   readonly memberships?: MembershipPort;
@@ -1534,6 +1549,55 @@ export class AuthService {
     }
   }
 
+  async createGalleryUpload(
+    request: Request,
+    input: GalleryUploadCommand,
+  ): Promise<GalleryUploadResponse> {
+    this.assertSameOrigin(request);
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "gallery-upload"), 10);
+    const requestKey = request.headers.get("idempotency-key");
+    if (requestKey === null || !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u.test(requestKey)) {
+      throw new ApiError(422, apiErrorCodes.validationError, "La clave de idempotencia no es válida.");
+    }
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("GALLERY_UPLOAD_HIDE");
+      const assetId = this.ids();
+      const extension = input.contentType === "image/jpeg"
+        ? "jpg"
+        : input.contentType === "image/png" ? "png" : "webp";
+      const mutation = await this.galleryRepository().createUpload({
+        assetId,
+        contentType: input.contentType,
+        createdAt: this.clock().toISOString(),
+        createdBy: principal.id,
+        fileName: input.fileName,
+        originalObjectKey: `gallery/originals/${assetId}.${extension}`,
+        requestKey,
+        size: input.size,
+      });
+      const intent = await this.galleryUploader().issue(
+        mutation.asset.id,
+        mutation.asset.originalObjectKey,
+        input,
+      );
+      return { ...intent, assetId: mutation.asset.id, disposition: mutation.disposition };
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      if (error instanceof DynamoDbRepositoryError && error.code === "IDEMPOTENCY_CONFLICT") {
+        throw new ApiError(409, apiErrorCodes.conflict, "La clave idempotente ya fue utilizada con otra imagen.");
+      }
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible preparar la carga de la imagen.");
+    }
+  }
+
+  async consumeLocalGalleryUpload(token: string, request: Request): Promise<void> {
+    const consume = this.galleryUploader().consumeLocal;
+    if (consume === undefined) throw new ApiError(404, apiErrorCodes.notFound, "La carga local no está disponible.");
+    await consume.call(this.galleryUploader(), token, request);
+  }
+
   async createPaymentReceiptUpload(
     request: Request,
     input: PaymentReceiptUploadCommand,
@@ -1871,6 +1935,20 @@ export class AuthService {
       throw new ApiError(500, apiErrorCodes.internalError, "La carga de comprobantes no está configurada.");
     }
     return this.dependencies.receipts;
+  }
+
+  private galleryRepository(): GalleryPort {
+    if (this.dependencies.gallery === undefined) {
+      throw new ApiError(500, apiErrorCodes.internalError, "El repositorio de galería no está configurado.");
+    }
+    return this.dependencies.gallery;
+  }
+
+  private galleryUploader(): GalleryUploadSignerPort {
+    if (this.dependencies.galleryUploads === undefined) {
+      throw new ApiError(500, apiErrorCodes.internalError, "La carga de galería no está configurada.");
+    }
+    return this.dependencies.galleryUploads;
   }
 
   private membershipStatus(value: string): Membership["status"] {

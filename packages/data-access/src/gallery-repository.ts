@@ -12,6 +12,7 @@ import { BaseDynamoDbRepository } from "./base-repository";
 import type { DynamoDbDocumentPort, DynamoDbItem, DynamoDbKey } from "./dynamodb-adapter";
 import { invalidDynamoDbInput, mapDynamoDbError } from "./dynamodb-errors";
 import { readFiniteNumber, tableName } from "./financial-validation";
+import { IdempotencyRepository } from "./idempotency-repository";
 import { primaryKeys } from "./model-keys";
 import { SHARDS, shardForId } from "./model-shards";
 import { CURRENT_SCHEMA_VERSION } from "./model-types";
@@ -24,6 +25,18 @@ export interface CreateGalleryAssetInput {
   readonly createdAt: string;
   readonly createdBy: string;
   readonly originalObjectKey: string;
+}
+
+export interface CreateGalleryUploadInput extends CreateGalleryAssetInput {
+  readonly contentType: string;
+  readonly fileName: string;
+  readonly requestKey: string;
+  readonly size: number;
+}
+
+export interface GalleryUploadMutationResult {
+  readonly asset: GalleryAsset;
+  readonly disposition: "CREATED" | "REPLAYED";
 }
 
 export interface CreatePhotoConsentInput {
@@ -69,11 +82,60 @@ const absent = (table: string, item: DynamoDbItem): TransactionAction => ({
 
 export class GalleryRepository {
   private readonly base: BaseDynamoDbRepository;
+  private readonly idempotency: IdempotencyRepository;
   private readonly table: string;
 
   constructor(private readonly document: DynamoDbDocumentPort, table: string) {
     this.table = tableName(table);
     this.base = new BaseDynamoDbRepository(document, { tableName: table });
+    this.idempotency = new IdempotencyRepository(document, table);
+  }
+
+  async createUpload(input: CreateGalleryUploadInput): Promise<GalleryUploadMutationResult> {
+    const createdAt = operationTimestamp(input.createdAt, "createdAt");
+    const asset: GalleryAsset = {
+      createdAt,
+      createdBy: operationId(input.createdBy, "createdBy"),
+      id: operationId(input.assetId, "assetId"),
+      originalObjectKey: objectKey(input.originalObjectKey, "originalObjectKey"),
+      status: "UPLOADING",
+      updatedAt: createdAt,
+      version: 1,
+    };
+    const result = await this.idempotency.transactOrReplay({
+      createdAt,
+      operation: "GALLERY_UPLOAD",
+      payload: {
+        contentType: input.contentType,
+        fileName: input.fileName,
+        size: input.size,
+      },
+      requestKey: input.requestKey,
+      result: {
+        assetId: asset.id,
+        originalObjectKey: asset.originalObjectKey,
+      },
+      retention: { kind: "DURABLE" },
+      subjectId: asset.createdBy,
+    }, [absent(this.table, this.assetItem(asset))]);
+    const replay = result.result as Readonly<Record<string, unknown>>;
+    if (
+      typeof result.result !== "object" ||
+      result.result === null ||
+      Array.isArray(result.result) ||
+      typeof replay.assetId !== "string" ||
+      typeof replay.originalObjectKey !== "string"
+    ) {
+      throw invalidDynamoDbInput("El resultado idempotente de galería no es válido.");
+    }
+    const persisted = await this.getAsset(replay.assetId);
+    if (
+      persisted === undefined ||
+      persisted.originalObjectKey !== replay.originalObjectKey
+    ) {
+      throw invalidDynamoDbInput("El activo idempotente de galería no es válido.");
+    }
+    return { asset: persisted, disposition: result.disposition };
   }
 
   async createAsset(input: CreateGalleryAssetInput): Promise<GalleryAsset> {

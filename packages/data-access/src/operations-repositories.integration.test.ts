@@ -58,6 +58,24 @@ describe.skipIf(!enabled)("TASK-017 repositories with DynamoDB Local", () => {
     await expect(gallery.publish({ assetId: "asset-002", consentId: "consent-002", expectedVersion: 2, publicObjectKey: "public/watermarked/asset-002.webp", publishedAt: "2026-08-08T12:25:00Z" })).rejects.toMatchObject({ code: "TRANSACTION_CANCELLED" });
   });
 
+  it("creates one idempotent private upload asset and rejects a changed payload", async () => {
+    const input = {
+      assetId: "asset-upload-001",
+      contentType: "image/jpeg",
+      createdAt: "2026-08-14T12:00:00Z",
+      createdBy: "staff-upload-001",
+      fileName: "entrenamiento.jpg",
+      originalObjectKey: "gallery/originals/asset-upload-001.jpg",
+      requestKey: "request-upload-001",
+      size: 4,
+    } as const;
+    const results = await Promise.all(Array.from({ length: 8 }, () => gallery.createUpload(input)));
+    expect(results.filter(({ disposition }) => disposition === "CREATED")).toHaveLength(1);
+    expect(results.every(({ asset }) => asset.id === input.assetId && asset.status === "UPLOADING")).toBe(true);
+    await expect(gallery.createUpload({ ...input, assetId: "asset-upload-002", size: 5 }))
+      .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+  });
+
   it("deduplicates reminders and lists pending work through GSI1", async () => {
     const input = { createdAt: "2026-08-08T13:00:00Z", dueDate: "2026-08-13", membershipId: "membership-001", notificationId: "notification-001", recipientUserId: "student-001", scheduledAt: "2026-08-08T13:05:00Z", type: "MEMBERSHIP_EXPIRY" as const };
     const first = await notifications.createReminder(input);

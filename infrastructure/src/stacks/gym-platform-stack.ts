@@ -9,6 +9,7 @@ import { DynamoDbTable } from "../database/dynamodb-table.js";
 import { SecurityFoundation } from "../foundation/security-foundation.js";
 import type { WebHostingArtifacts } from "../hosting/web-hosting-artifacts.js";
 import { WebHosting } from "../hosting/web-hosting.js";
+import { GalleryStorage, galleryOriginalsPrefix } from "../gallery/gallery-storage.js";
 
 export interface GymPlatformStackProps extends StackProps {
   readonly environmentConfig: EnvironmentConfig;
@@ -19,6 +20,7 @@ export class GymPlatformStack extends Stack {
   readonly cognitoAuth: CognitoAuth;
   readonly dynamoDbTable: DynamoDbTable;
   readonly environmentConfig: EnvironmentConfig;
+  readonly galleryStorage: GalleryStorage;
   readonly securityFoundation: SecurityFoundation;
   readonly webHosting: WebHosting;
 
@@ -45,6 +47,10 @@ export class GymPlatformStack extends Stack {
     });
     this.webHosting = new WebHosting(this, "WebHosting", {
       artifacts: props.webHostingArtifacts,
+      environmentConfig: props.environmentConfig,
+      securityFoundation: this.securityFoundation,
+    });
+    this.galleryStorage = new GalleryStorage(this, "GalleryStorage", {
       environmentConfig: props.environmentConfig,
       securityFoundation: this.securityFoundation,
     });
@@ -85,6 +91,10 @@ export class GymPlatformStack extends Stack {
       this.dynamoDbTable.table.tableName,
     );
     this.webHosting.serverFunction.addEnvironment(
+      "GALLERY_ORIGINALS_BUCKET_NAME",
+      this.galleryStorage.originalsBucket.bucketName,
+    );
+    this.webHosting.serverFunction.addEnvironment(
       "SEARCH_TOKEN_SECRET_ARN",
       this.securityFoundation.searchTokenSecret.secretArn,
     );
@@ -105,6 +115,14 @@ export class GymPlatformStack extends Stack {
         resources: [`${this.dynamoDbTable.table.tableArn}/index/*`],
       }),
     );
+    this.webHosting.serverFunction.addToRolePolicy(new PolicyStatement({
+      actions: ["s3:PutObject"],
+      resources: [this.galleryStorage.originalsBucket.arnForObjects(`${galleryOriginalsPrefix}*`)],
+    }));
+    this.webHosting.serverFunction.addToRolePolicy(new PolicyStatement({
+      actions: ["kms:GenerateDataKey"],
+      resources: [this.securityFoundation.encryptionKey.keyArn],
+    }));
     this.securityFoundation.searchTokenSecret.grantRead(
       this.securityFoundation.applicationRuntimeRole,
     );

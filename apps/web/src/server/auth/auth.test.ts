@@ -5,7 +5,7 @@ import {
   SignJWT,
 } from "jose";
 import type { CreatePendingUserResult } from "@gym-adr/data-access";
-import type { ClassSession, ClassType, Membership, MembershipPlan, Payment, Reservation, Trainer, UserProfile } from "@gym-adr/domain";
+import type { ClassSession, ClassType, GalleryAsset, Membership, MembershipPlan, Payment, Reservation, Trainer, UserProfile } from "@gym-adr/domain";
 import {
   validateAdminStudentQuery,
   validateCompleteProfile,
@@ -20,12 +20,13 @@ import {
 import { describe, expect, it, vi } from "vitest";
 
 import { resolveAuthConfig, type AuthConfig } from "./auth-config";
-import { AuthService, type BookingPort, type ClassSessionPort, type GymSettingsPort, type MembershipPlanPort, type MembershipPort, type PaymentPort, type PendingUserPort, type ReservationPort, type SchedulingCatalogPort } from "./auth-service";
+import { AuthService, type BookingPort, type ClassSessionPort, type GalleryPort, type GymSettingsPort, type MembershipPlanPort, type MembershipPort, type PaymentPort, type PendingUserPort, type ReservationPort, type SchedulingCatalogPort } from "./auth-service";
 import { CognitoTokenClient, type CognitoTokenPort } from "./cognito-client";
 import { oauthCookieNames, sessionCookieName } from "./cookies";
 import { FixedWindowRateLimiter } from "./rate-limiter";
 import type { RateLimiter } from "./rate-limiter";
 import type { ReceiptUploadPort } from "../payments/receipt-upload";
+import type { GalleryUploadSignerPort } from "../gallery/gallery-upload";
 
 const config: AuthConfig = {
   appBaseUrl: "https://app.example.com",
@@ -297,6 +298,27 @@ describe("OAuth session service", () => {
       issue: vi.fn(async () => ({ headers: { "content-type": "application/pdf" }, key: "payment-receipts/test.pdf", uploadUrl: "/signed-upload" })),
       issueDownload: vi.fn(async () => "/signed-download"),
     };
+    const galleryPort: GalleryPort = {
+      createUpload: vi.fn(async (input) => ({
+        asset: {
+          createdAt: input.createdAt,
+          createdBy: input.createdBy,
+          id: input.assetId,
+          originalObjectKey: input.originalObjectKey,
+          status: "UPLOADING",
+          updatedAt: input.createdAt,
+          version: 1,
+        } satisfies GalleryAsset,
+        disposition: "CREATED" as const,
+      })),
+    };
+    const galleryUploadPort: GalleryUploadSignerPort = {
+      issue: vi.fn(async (assetId, key, input) => ({
+        headers: { "content-type": input.contentType, "x-amz-meta-assetid": assetId },
+        key,
+        uploadUrl: "/signed-gallery-upload",
+      })),
+    };
     const catalogPort: SchedulingCatalogPort = {
       createClassType: vi.fn(async (input) => ({ createdAt: input.createdAt, createdBy: input.actorId, ...(input.description === undefined ? {} : { description: input.description }), id: input.id, name: input.name, status: "ACTIVE", updatedAt: input.createdAt, updatedBy: input.actorId, version: 1 } satisfies ClassType)),
       createTrainer: vi.fn(async (input) => ({ createdAt: input.createdAt, createdBy: input.actorId, ...(input.description === undefined ? {} : { bio: input.description }), id: input.id, name: input.name, status: "ACTIVE", updatedAt: input.createdAt, updatedBy: input.actorId, version: 1 } satisfies Trainer)),
@@ -359,6 +381,8 @@ describe("OAuth session service", () => {
       catalog: catalogPort,
       classSessions: classSessionPort,
       config,
+      gallery: galleryPort,
+      galleryUploads: galleryUploadPort,
       ids: () => `user-${++sequence}`,
       memberships: membershipPort,
       payments: paymentPort,
@@ -370,7 +394,7 @@ describe("OAuth session service", () => {
       tokens,
       users: userPort,
     });
-    return { bookingPort, catalogPort, classSessionPort, classSessionRecords, completed, membershipPort, memberships, paymentPort, paymentRecords, planPort, plans, receiptPort, reservationPort, reservationRecords, service, settingsPort, tokens, userPort, users };
+    return { bookingPort, catalogPort, classSessionPort, classSessionRecords, completed, galleryPort, galleryUploadPort, membershipPort, memberships, paymentPort, paymentRecords, planPort, plans, receiptPort, reservationPort, reservationRecords, service, settingsPort, tokens, userPort, users };
   };
 
   it("starts authorization with state, nonce, S256 PKCE and hardened cookies", () => {
@@ -1192,6 +1216,39 @@ describe("OAuth session service", () => {
     memberships.set("membership-booking", { ...memberships.get("membership-booking")!, endDate: "2026-08-07" });
     await expect(service.reserveOwnClass(request(), "class-1"))
       .rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+  });
+
+  it("authorizes bounded idempotent gallery uploads only for active staff and admins", async () => {
+    const { completed, galleryPort, galleryUploadPort, service, userPort } = setup();
+    const actor = { ...identity, createdAt: "2026-08-08T12:00:00Z", userId: "gallery-operator" };
+    await userPort.createPending(actor);
+    const profile = { createdAt: actor.createdAt, displayName: "Operador", email: actor.email, emailVerified: true, id: actor.userId, roles: ["STAFF"] as const, status: "ACTIVE" as const, updatedAt: actor.createdAt, version: 2 };
+    completed.set(actor.userId, profile);
+    const request = (key = "gallery-request-001") => new Request("https://app.example.com/api/v1/admin/gallery/uploads", {
+      headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token`, "idempotency-key": key, origin: config.appBaseUrl },
+      method: "POST",
+    });
+    const command = { contentType: "image/jpeg", fileName: "entrenamiento.jpg", size: 4 } as const;
+
+    await expect(service.createGalleryUpload(request(), command)).resolves.toMatchObject({
+      assetId: "user-1",
+      disposition: "CREATED",
+      key: "gallery/originals/user-1.jpg",
+      uploadUrl: "/signed-gallery-upload",
+    });
+    expect(galleryPort.createUpload).toHaveBeenCalledWith(expect.objectContaining({ createdBy: actor.userId, requestKey: "gallery-request-001" }));
+    expect(galleryUploadPort.issue).toHaveBeenCalledWith("user-1", "gallery/originals/user-1.jpg", command);
+
+    completed.set(actor.userId, { ...profile, roles: ["ADMIN"] });
+    await expect(service.createGalleryUpload(request("gallery-request-002"), command)).resolves.toMatchObject({ disposition: "CREATED" });
+    completed.set(actor.userId, { ...profile, roles: ["STUDENT"] });
+    await expect(service.createGalleryUpload(request("gallery-request-003"), command)).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+    completed.set(actor.userId, { ...profile, status: "PENDING" });
+    await expect(service.createGalleryUpload(request("gallery-request-004"), command)).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+    await expect(service.createGalleryUpload(request("short"), command)).rejects.toMatchObject({ status: 422 });
+    await expect(service.createGalleryUpload(new Request("https://app.example.com/api/v1/admin/gallery/uploads", {
+      headers: { "idempotency-key": "gallery-request-005", origin: config.appBaseUrl }, method: "POST",
+    }), command)).rejects.toMatchObject({ code: "AUTHENTICATION_REQUIRED", status: 401 });
   });
 
   it("lists only the authenticated student's classes and rejects a foreign reservation cursor", async () => {
