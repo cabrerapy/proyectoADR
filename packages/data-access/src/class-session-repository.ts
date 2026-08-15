@@ -115,6 +115,16 @@ export interface ReserveCapacityUpdate {
   readonly nextSession: ClassSession;
 }
 
+export interface CancelCapacityUpdate {
+  readonly action: TransactionAction;
+  readonly nextSession: ClassSession;
+}
+
+export interface CounterRepairUpdate {
+  readonly action: TransactionAction;
+  readonly nextSession: ClassSession;
+}
+
 interface ClassSessionItem extends DynamoDbItem {
   readonly GSI1PK: string;
   readonly GSI1SK: string;
@@ -466,6 +476,104 @@ export class ClassSessionRepository {
           TableName: this.table,
           UpdateExpression:
             "SET #confirmedCount = :nextCount, #version = :nextVersion, #updatedAt = :updatedAt, #gsi1pk = :gsi1pk, #gsi1sk = :gsi1sk",
+        },
+      },
+      nextSession,
+    };
+  }
+
+  buildCancelCapacityUpdate(
+    current: ClassSession,
+    updatedAtInput: string,
+  ): CancelCapacityUpdate {
+    if (current.status !== "SCHEDULED" || current.confirmedCount < 1) {
+      throw classError("CLASS_SESSION_CONFLICT", "La sesión no admite cancelar una reserva confirmada.");
+    }
+    const updatedAt = schedulingTimestamp(updatedAtInput, "updatedAt");
+    if (updatedAt < current.updatedAt) {
+      throw invalidDynamoDbInput("updatedAt no puede ser anterior a la sesión.");
+    }
+    const nextSession: ClassSession = {
+      ...current,
+      confirmedCount: current.confirmedCount - 1,
+      updatedAt,
+      version: current.version + 1,
+    };
+    const nextIndexes = this.indexes(nextSession);
+    return {
+      action: {
+        Update: {
+          ConditionExpression:
+            "attribute_exists(#pk) AND #status = :scheduled AND #version = :expectedVersion AND #confirmedCount = :expectedCount AND #confirmedCount > :zero",
+          ExpressionAttributeNames: {
+            "#confirmedCount": "confirmedCount",
+            "#gsi1pk": "GSI1PK",
+            "#gsi1sk": "GSI1SK",
+            "#pk": "PK",
+            "#status": "status",
+            "#updatedAt": "updatedAt",
+            "#version": "version",
+          },
+          ExpressionAttributeValues: {
+            ":expectedCount": current.confirmedCount,
+            ":expectedVersion": current.version,
+            ":gsi1pk": nextIndexes.GSI1PK,
+            ":gsi1sk": nextIndexes.GSI1SK,
+            ":nextCount": nextSession.confirmedCount,
+            ":nextVersion": nextSession.version,
+            ":scheduled": "SCHEDULED",
+            ":updatedAt": updatedAt,
+            ":zero": 0,
+          },
+          Key: primaryKeys.classSession(current.id),
+          TableName: this.table,
+          UpdateExpression:
+            "SET #confirmedCount = :nextCount, #version = :nextVersion, #updatedAt = :updatedAt, #gsi1pk = :gsi1pk, #gsi1sk = :gsi1sk",
+        },
+      },
+      nextSession,
+    };
+  }
+
+  buildCounterRepair(
+    current: ClassSession,
+    confirmedCount: number,
+    updatedAtInput: string,
+  ): CounterRepairUpdate {
+    if (
+      !Number.isSafeInteger(confirmedCount) ||
+      confirmedCount < 0 ||
+      confirmedCount > current.capacity ||
+      confirmedCount === current.confirmedCount
+    ) {
+      throw invalidDynamoDbInput("El contador de reconciliación no es válido o no requiere ajuste.");
+    }
+    const updatedAt = schedulingTimestamp(updatedAtInput, "updatedAt");
+    if (updatedAt < current.updatedAt) {
+      throw invalidDynamoDbInput("updatedAt no puede ser anterior a la sesión.");
+    }
+    const nextSession: ClassSession = {
+      ...current,
+      confirmedCount,
+      updatedAt,
+      version: current.version + 1,
+    };
+    return {
+      action: {
+        Put: {
+          ConditionExpression:
+            "attribute_exists(#pk) AND #version = :expectedVersion AND #confirmedCount = :expectedCount",
+          ExpressionAttributeNames: {
+            "#confirmedCount": "confirmedCount",
+            "#pk": "PK",
+            "#version": "version",
+          },
+          ExpressionAttributeValues: {
+            ":expectedCount": current.confirmedCount,
+            ":expectedVersion": current.version,
+          },
+          Item: this.toItem(nextSession, primaryKeys.classSession(current.id)),
+          TableName: this.table,
         },
       },
       nextSession,

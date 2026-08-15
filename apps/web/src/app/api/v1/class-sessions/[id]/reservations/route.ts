@@ -13,3 +13,16 @@ export const POST = createApiHandler(async (request) => {
     status: result.disposition === "CREATED" ? 201 : 200,
   });
 });
+
+export const DELETE = createApiHandler(async (request, context) => {
+  const segments = new URL(request.url).pathname.split("/").filter(Boolean);
+  const classId = segments.at(-2);
+  if (classId === undefined) {
+    throw new ApiError(422, apiErrorCodes.validationError, "La sesión no es válida.");
+  }
+  return Response.json(await (await getAuthService()).cancelOwnReservation(
+    request,
+    context.correlationId,
+    classId,
+  ));
+});

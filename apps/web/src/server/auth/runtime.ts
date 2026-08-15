@@ -8,6 +8,7 @@ import {
   createDynamoDbAdapter,
   BookingRepository,
   ClassSessionRepository,
+  GymSettingsRepository,
   MembershipRepository,
   MembershipPlanRepository,
   PaymentRepository,
@@ -131,6 +132,7 @@ const createService = async (): Promise<AuthService> => {
     plans: new MembershipPlanRepository(adapter, tableName),
     tokens: new CognitoTokenClient(config),
     receipts,
+    settings: new GymSettingsRepository(adapter, tableName),
     users,
   });
 };

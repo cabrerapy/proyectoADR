@@ -204,4 +204,27 @@ describe("scheduling repositories", () => {
       }),
     });
   });
+
+  it("builds student cancellation and a positive versioned counter decrement", async () => {
+    const port = createPort();
+    const reservations = new ReservationRepository(port, "gym-adr-platform-local");
+    const sessions = new ClassSessionRepository(port, "gym-adr-platform-local");
+    const confirmed = reservations.buildConfirmedPut({
+      classId: "class-001",
+      createdAt: "2026-08-08T13:00:00Z",
+      reservationId: "reservation-001",
+      startsAt: "2026-08-10T22:00:00Z",
+      studentId: "student-001",
+    }).reservation;
+    const cancelled = reservations.buildStudentCancellation(confirmed, "2026-08-08T14:00:00Z");
+    const created = await sessions.create({ ...classInput, capacity: 1 });
+    const current = { ...created, confirmedCount: 1, version: 2 };
+    const capacity = sessions.buildCancelCapacityUpdate(current, "2026-08-08T14:00:00Z");
+
+    expect(cancelled).toMatchObject({ reservation: { status: "CANCELLED", version: 2 } });
+    expect(cancelled.action.Update?.ConditionExpression).toContain("#status = :confirmed");
+    expect(capacity.nextSession).toMatchObject({ confirmedCount: 0, version: 3 });
+    expect(capacity.action.Update?.ConditionExpression).toContain("#confirmedCount > :zero");
+    expect(capacity.action.Update?.ExpressionAttributeValues).toMatchObject({ ":gsi1sk": expect.stringMatching(/^AVAILABLE#/u) });
+  });
 });

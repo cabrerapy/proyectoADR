@@ -20,7 +20,7 @@ import {
 import { describe, expect, it, vi } from "vitest";
 
 import { resolveAuthConfig, type AuthConfig } from "./auth-config";
-import { AuthService, type BookingPort, type ClassSessionPort, type MembershipPlanPort, type MembershipPort, type PaymentPort, type PendingUserPort, type SchedulingCatalogPort } from "./auth-service";
+import { AuthService, type BookingPort, type ClassSessionPort, type GymSettingsPort, type MembershipPlanPort, type MembershipPort, type PaymentPort, type PendingUserPort, type SchedulingCatalogPort } from "./auth-service";
 import { CognitoTokenClient, type CognitoTokenPort } from "./cognito-client";
 import { oauthCookieNames, sessionCookieName } from "./cookies";
 import { FixedWindowRateLimiter } from "./rate-limiter";
@@ -317,6 +317,19 @@ describe("OAuth session service", () => {
       update: vi.fn(async (input) => { const current = classSessionRecords.find((entry) => entry.id === input.classId); if (current === undefined) throw new Error("missing class"); const value: ClassSession = { ...current, capacity: input.capacity, classDate: input.classDate, classTypeId: input.classTypeId, classTypeName: input.classTypeName, endsAt: input.endsAt, startTime: input.startTime, startsAt: input.startsAt, trainerId: input.trainerId, trainerName: input.trainerName, updatedAt: input.updatedAt, version: input.expectedVersion + 1 }; classSessionRecords.splice(classSessionRecords.indexOf(current), 1, value); return value; }),
     };
     const bookingPort: BookingPort = {
+      cancel: vi.fn(async (input) => ({
+        disposition: "CREATED" as const,
+        reservation: {
+          classId: input.classId,
+          createdAt: "2026-08-08T10:00:00Z",
+          id: "reservation-001",
+          startsAt: "2026-08-10T22:00:00.000Z",
+          status: "CANCELLED",
+          studentId: input.studentId,
+          updatedAt: input.cancelledAt,
+          version: 2,
+        } satisfies Reservation,
+      })),
       reserve: vi.fn(async (input) => ({
         disposition: "CREATED" as const,
         reservation: {
@@ -331,6 +344,9 @@ describe("OAuth session service", () => {
         } satisfies Reservation,
       })),
     };
+    const settingsPort: GymSettingsPort = {
+      get: vi.fn(async () => ({ cancellationWindowMinutes: 120, currency: "PYG", gymName: "Gym ADR", timezone: "America/Asuncion", updatedAt: "2026-08-08T10:00:00Z", updatedBy: "admin", version: 1 })),
+    };
     let sequence = 0;
     const service = new AuthService({
       bookings: bookingPort,
@@ -344,10 +360,11 @@ describe("OAuth session service", () => {
       plans: planPort,
       rateLimiter,
       receipts: receiptPort,
+      settings: settingsPort,
       tokens,
       users: userPort,
     });
-    return { bookingPort, catalogPort, classSessionPort, classSessionRecords, completed, membershipPort, memberships, paymentPort, paymentRecords, planPort, plans, receiptPort, service, tokens, userPort, users };
+    return { bookingPort, catalogPort, classSessionPort, classSessionRecords, completed, membershipPort, memberships, paymentPort, paymentRecords, planPort, plans, receiptPort, service, settingsPort, tokens, userPort, users };
   };
 
   it("starts authorization with state, nonce, S256 PKCE and hardened cookies", () => {
@@ -1144,10 +1161,27 @@ describe("OAuth session service", () => {
       requestKey: "booking-request-001",
       studentId: actor.userId,
     }));
+    const cancelRequest = new Request("https://app.example.com/api/v1/class-sessions/class-1/reservations", {
+      headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token`, "idempotency-key": "cancel-booking-request-001", origin: config.appBaseUrl },
+      method: "DELETE",
+    });
+    await expect(service.cancelOwnReservation(cancelRequest, "correlation-cancel", "class-1"))
+      .resolves.toMatchObject({ reservation: { status: "CANCELLED", studentId: actor.userId } });
+    expect(bookingPort.cancel).toHaveBeenCalledWith(expect.objectContaining({
+      actorId: actor.userId,
+      cancellationWindowMinutes: 120,
+      classId: "class-1",
+      settingsVersion: 1,
+      studentId: actor.userId,
+    }));
 
     completed.set(actor.userId, { ...completed.get(actor.userId)!, status: "SUSPENDED" });
     await expect(service.reserveOwnClass(request(), "class-1"))
       .rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+    await expect(service.cancelOwnReservation(new Request("https://app.example.com/api/v1/class-sessions/class-1/reservations", {
+      headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token`, "idempotency-key": "cancel-booking-suspended", origin: config.appBaseUrl },
+      method: "DELETE",
+    }), "correlation-suspended", "class-1")).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
     completed.set(actor.userId, { ...completed.get(actor.userId)!, status: "ACTIVE" });
     memberships.set("membership-booking", { ...memberships.get("membership-booking")!, endDate: "2026-08-07" });
     await expect(service.reserveOwnClass(request(), "class-1"))

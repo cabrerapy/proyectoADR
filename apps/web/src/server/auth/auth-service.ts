@@ -19,6 +19,8 @@ import {
   type CancelClassSessionInput,
   type ClassCancellationBatch,
   type BookingMutationResult,
+  type CancellationMutationResult,
+  type CancelBookingInput,
   type CreateBookingInput,
   type ClassSessionPage,
   type PropagateClassCancellationInput,
@@ -47,6 +49,7 @@ import {
   type PaymentStatus,
   type ClassType,
   type ClassSession,
+  type GymSettings,
   type Trainer,
   type UserProfile,
   type UserStatus,
@@ -167,7 +170,12 @@ export interface ClassSessionPort {
 }
 
 export interface BookingPort {
+  cancel(input: CancelBookingInput): Promise<CancellationMutationResult>;
   reserve(input: CreateBookingInput): Promise<BookingMutationResult>;
+}
+
+export interface GymSettingsPort {
+  get(): Promise<GymSettings | undefined>;
 }
 
 export interface OnboardingProfile {
@@ -262,6 +270,7 @@ export interface AuthServiceDependencies {
   readonly catalog?: SchedulingCatalogPort;
   readonly classSessions?: ClassSessionPort;
   readonly ids?: () => string;
+  readonly settings?: GymSettingsPort;
   readonly memberships?: MembershipPort;
   readonly payments?: PaymentPort;
   readonly plans?: MembershipPlanPort;
@@ -1202,6 +1211,55 @@ export class AuthService {
     }
   }
 
+  async cancelOwnReservation(
+    request: Request,
+    correlationId: string,
+    classId: string,
+  ): Promise<CancellationMutationResult> {
+    this.assertSameOrigin(request);
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "booking-cancel"), 20);
+    const requestKey = request.headers.get("idempotency-key");
+    if (requestKey === null || !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u.test(requestKey)) {
+      throw new ApiError(422, apiErrorCodes.validationError, "La clave de idempotencia no es válida.");
+    }
+    try {
+      const scope = new AuthorizedRepositoryScope(principalFromProfile(principal));
+      return await scope.mutateOwn("RESERVATION_MANAGE_OWN", async (studentId) => {
+        const settings = await this.settingsRepository().get();
+        if (settings === undefined) {
+          throw new ApiError(500, apiErrorCodes.internalError, "La configuración del gimnasio no está disponible.");
+        }
+        return this.bookingRepository().cancel({
+          actorId: studentId,
+          auditId: this.ids(),
+          cancellationWindowMinutes: settings.cancellationWindowMinutes,
+          cancelledAt: this.clock().toISOString(),
+          classId,
+          correlationId,
+          requestKey,
+          settingsVersion: settings.version,
+          studentId,
+        });
+      });
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      if (error instanceof DynamoDbRepositoryError) {
+        if (error.code === "RESOURCE_NOT_FOUND") {
+          throw new ApiError(404, apiErrorCodes.notFound, "No se encontró la reserva.");
+        }
+        if (error.code === "BOOKING_CONFLICT" || error.code === "IDEMPOTENCY_CONFLICT") {
+          throw new ApiError(409, apiErrorCodes.conflict, "La reserva ya no puede cancelarse o la solicitud está duplicada.");
+        }
+        if (error.code === "INVALID_INPUT") {
+          throw new ApiError(422, apiErrorCodes.validationError, "La solicitud de cancelación no es válida.");
+        }
+      }
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible cancelar la reserva.");
+    }
+  }
+
   async listAdminMemberships(
     request: Request,
     query: MembershipHistoryQuery,
@@ -1695,6 +1753,13 @@ export class AuthService {
       throw new ApiError(500, apiErrorCodes.internalError, "El servicio de reservas no está configurado.");
     }
     return this.dependencies.bookings;
+  }
+
+  private settingsRepository(): GymSettingsPort {
+    if (this.dependencies.settings === undefined) {
+      throw new ApiError(500, apiErrorCodes.internalError, "El servicio de configuración no está configurado.");
+    }
+    return this.dependencies.settings;
   }
 
   private membershipRepository(): MembershipPort {

@@ -308,6 +308,58 @@ describe.skipIf(!enabled)("scheduling repositories with DynamoDB Local", () => {
     await expect(reservations.getForStudent(session.id, studentId)).resolves.toBeUndefined();
   });
 
+  it("cancels atomically once, restores availability and audits the owner action", async () => {
+    const session = await sessions.create({
+      ...firstClass,
+      auditId: "audit-class-own-cancel-001",
+      capacity: 1,
+      classDate: "2026-08-16",
+      classId: "class-own-cancel-001",
+      endsAt: "2026-08-16T23:00:00Z",
+      startsAt: "2026-08-16T22:00:00Z",
+    });
+    const studentId = "student-own-cancel-001";
+    const todayEpochDay = Math.floor(Date.parse("2026-08-08T00:00:00Z") / 86_400_000);
+    await adapter.put({ Item: { ...primaryKeys.userProfile(studentId), createdAt: "2026-08-01T10:00:00Z", entityType: "UserProfile", roles: ["STUDENT"], schemaVersion: 1, status: "ACTIVE", updatedAt: "2026-08-01T10:00:00Z", userId: studentId }, TableName: tableName });
+    await adapter.put({ Item: { ...primaryKeys.activeMembership(studentId), createdAt: "2026-08-01T10:00:00Z", endEpochDay: todayEpochDay + 30, entityType: "ActiveMembershipPointer", membershipId: "membership-own-cancel-001", schemaVersion: 1, startEpochDay: todayEpochDay - 7, status: "ACTIVE", updatedAt: "2026-08-01T10:00:00Z", userId: studentId }, TableName: tableName });
+    await adapter.put({ Item: { ...primaryKeys.gymSettings(), cancellationWindowMinutes: 120, currency: "PYG", entityType: "GymSettings", gymName: "Gym ADR", schemaVersion: 1, timezone: "America/Asuncion", updatedAt: "2026-08-01T10:00:00Z", updatedBy: "admin-001", version: 1 }, TableName: tableName });
+    await bookings.reserve({ classId: session.id, createdAt: "2026-08-08T16:00:00Z", requestKey: "booking-own-cancel-001", reservationId: "reservation-own-cancel-001", studentId, todayEpochDay });
+    const cancellation = { actorId: studentId, auditId: "audit-reservation-cancel-001", cancellationWindowMinutes: 120, cancelledAt: "2026-08-08T16:10:00Z", classId: session.id, correlationId: "correlation-reservation-cancel-001", requestKey: "cancel-booking-own-001", settingsVersion: 1, studentId } as const;
+
+    await expect(bookings.cancel(cancellation)).resolves.toMatchObject({ disposition: "CREATED", reservation: { status: "CANCELLED" } });
+    await expect(bookings.cancel(cancellation)).resolves.toMatchObject({ disposition: "REPLAYED", reservation: { status: "CANCELLED" } });
+    await expect(bookings.cancel({ ...cancellation, requestKey: "cancel-booking-own-002" })).resolves.toMatchObject({ disposition: "REPLAYED" });
+    await expect(sessions.getById(session.id)).resolves.toMatchObject({ confirmedCount: 0, version: 3 });
+    await expect(sessions.listAvailable("2026-08-16", "2026-08-16")).resolves.toMatchObject({ sessions: [expect.objectContaining({ id: session.id })] });
+    const auditPage = await audits.listByEntity("Reservation", "reservation-own-cancel-001", "2026-08-08T00:00:00Z", "2026-08-09T00:00:00Z");
+    expect(auditPage.entries.map(({ action }) => action)).toEqual(["RESERVATION_CANCELLED"]);
+  });
+
+  it("rejects late cancellation without decrementing the counter", async () => {
+    const session = await sessions.create({ ...firstClass, auditId: "audit-class-late-001", capacity: 1, classDate: "2026-08-08", classId: "class-late-001", endsAt: "2026-08-08T18:00:00Z", startsAt: "2026-08-08T17:00:00Z" });
+    const studentId = "student-late-001";
+    const todayEpochDay = Math.floor(Date.parse("2026-08-08T00:00:00Z") / 86_400_000);
+    await adapter.put({ Item: { ...primaryKeys.userProfile(studentId), createdAt: "2026-08-01T10:00:00Z", entityType: "UserProfile", roles: ["STUDENT"], schemaVersion: 1, status: "ACTIVE", updatedAt: "2026-08-01T10:00:00Z", userId: studentId }, TableName: tableName });
+    await adapter.put({ Item: { ...primaryKeys.activeMembership(studentId), createdAt: "2026-08-01T10:00:00Z", endEpochDay: todayEpochDay + 30, entityType: "ActiveMembershipPointer", membershipId: "membership-late-001", schemaVersion: 1, startEpochDay: todayEpochDay - 7, status: "ACTIVE", updatedAt: "2026-08-01T10:00:00Z", userId: studentId }, TableName: tableName });
+    await adapter.put({ Item: { ...primaryKeys.gymSettings(), cancellationWindowMinutes: 120, currency: "PYG", entityType: "GymSettings", gymName: "Gym ADR", schemaVersion: 1, timezone: "America/Asuncion", updatedAt: "2026-08-01T10:00:00Z", updatedBy: "admin-001", version: 1 }, TableName: tableName });
+    await bookings.reserve({ classId: session.id, createdAt: "2026-08-08T12:00:00Z", requestKey: "booking-late-001", reservationId: "reservation-late-001", studentId, todayEpochDay });
+    await expect(bookings.cancel({ actorId: studentId, auditId: "audit-late-cancel-001", cancellationWindowMinutes: 120, cancelledAt: "2026-08-08T16:00:00Z", classId: session.id, correlationId: "correlation-late-cancel-001", requestKey: "cancel-booking-late-001", settingsVersion: 1, studentId })).rejects.toMatchObject({ code: "BOOKING_CONFLICT" });
+    await expect(sessions.getById(session.id)).resolves.toMatchObject({ confirmedCount: 1 });
+    await expect(reservations.getForStudent(session.id, studentId)).resolves.toMatchObject({ status: "CONFIRMED" });
+  });
+
+  it("rebuilds a drifted counter from a strong partition query and audits only the repair", async () => {
+    const session = await sessions.create({ ...firstClass, auditId: "audit-class-repair-create", capacity: 3, classDate: "2026-08-17", classId: "class-repair-001", endsAt: "2026-08-17T23:00:00Z", startsAt: "2026-08-17T22:00:00Z" });
+    const actions = ["repair-student-001", "repair-student-002"].map((studentId) => reservations.buildConfirmedPut({ classId: session.id, createdAt: "2026-08-08T17:00:00Z", reservationId: `reservation-${studentId}`, startsAt: session.startsAt, studentId }).action);
+    await adapter.transactWrite({ TransactItems: actions });
+
+    await expect(bookings.reconcileClassCounter({ actorId: "system-reconciler", auditId: "audit-class-repair-001", classId: session.id, correlationId: "correlation-class-repair-001", reconciledAt: "2026-08-08T17:10:00Z" })).resolves.toEqual({ changed: true, confirmedCount: 2, previousCount: 0, version: 2 });
+    await expect(bookings.reconcileClassCounter({ actorId: "system-reconciler", auditId: "audit-class-repair-noop", classId: session.id, correlationId: "correlation-class-repair-noop", reconciledAt: "2026-08-08T17:20:00Z" })).resolves.toEqual({ changed: false, confirmedCount: 2, previousCount: 2, version: 2 });
+    await expect(sessions.getById(session.id)).resolves.toMatchObject({ confirmedCount: 2, version: 2 });
+    const auditPage = await audits.listByEntity("ClassSession", session.id, "2026-08-08T00:00:00Z", "2026-08-09T00:00:00Z");
+    expect(auditPage.entries.map(({ action }) => action)).toEqual(["CLASS_SESSION_CREATED", "CLASS_SESSION_COUNTER_RECONCILED"]);
+  });
+
   it("blocks a cancelled session immediately and resumes idempotent reservation batches", async () => {
     let session = await sessions.create({
       ...firstClass,
