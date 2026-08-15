@@ -1,4 +1,4 @@
-import { validateCancelClassSession, validateClassSessionQuery, validateCreateClassSession, validateUpdateClassSession } from "@gym-adr/validation";
+import { validateCancelClassSession, validateClassSessionQuery, validateCreateClassSession, validateOwnClassScheduleQuery, validateUpdateClassSession } from "@gym-adr/validation";
 import { describe, expect, it } from "vitest";
 
 describe("class session validation", () => {
@@ -19,5 +19,10 @@ describe("class session validation", () => {
     expect(validateCancelClassSession({ expectedVersion: 2, reason: "corto" })).toMatchObject({ success: false });
     expect(validateCancelClassSession({ cursor: "not valid!", expectedVersion: 2, reason: "Entrenador no disponible" })).toMatchObject({ success: false });
     expect(validateCancelClassSession({ expectedVersion: 2, reason: "Entrenador no disponible", status: "CANCELLED" })).toMatchObject({ success: false });
+  });
+  it("accepts a bounded own schedule period and rejects foreign parameters", () => {
+    expect(validateOwnClassScheduleQuery(new URLSearchParams({ from: "2026-08-10", to: "2026-08-24" }))).toMatchObject({ success: true });
+    expect(validateOwnClassScheduleQuery(new URLSearchParams({ from: "2026-08-10", to: "2026-10-24" }))).toMatchObject({ success: false });
+    expect(validateOwnClassScheduleQuery(new URLSearchParams({ from: "2026-08-10", to: "2026-08-24", userId: "other" }))).toMatchObject({ success: false });
   });
 });

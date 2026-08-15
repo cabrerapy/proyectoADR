@@ -23,6 +23,7 @@ import {
   type CancelBookingInput,
   type CreateBookingInput,
   type ClassSessionPage,
+  type ReservationRepository,
   type PropagateClassCancellationInput,
   type UpdateClassSessionInput,
   type SchedulingCatalogCursors,
@@ -50,6 +51,7 @@ import {
   type ClassType,
   type ClassSession,
   type GymSettings,
+  type Reservation,
   type Trainer,
   type UserProfile,
   type UserStatus,
@@ -68,6 +70,7 @@ import type {
   MembershipHistoryQuery,
   MembershipReportQuery,
   OwnMembershipQuery,
+  OwnClassScheduleQuery,
   OwnPaymentQuery,
   PaymentReceiptQuery,
   PaymentReceiptUploadCommand,
@@ -165,9 +168,12 @@ export interface ClassSessionPort {
   create(input: CreateClassSessionInput): Promise<ClassSession>;
   getById(id: string, consistentRead?: boolean): Promise<ClassSession | undefined>;
   listByDate(date: string): Promise<ClassSessionPage>;
+  listAvailable(fromDate: string, toDate: string, options?: { readonly limitPerPartition?: number }): Promise<ClassSessionPage>;
   propagateCancellationBatch(input: PropagateClassCancellationInput): Promise<ClassCancellationBatch>;
   update(input: UpdateClassSessionInput): Promise<ClassSession>;
 }
+
+export type ReservationPort = Pick<ReservationRepository, "listByStudent">;
 
 export interface BookingPort {
   cancel(input: CancelBookingInput): Promise<CancellationMutationResult>;
@@ -246,6 +252,13 @@ export interface OwnMembershipPage {
   readonly history: readonly AdminMembershipView[];
 }
 
+export type OwnReservationView = Omit<Reservation, "studentId"> & { readonly session?: ClassSession };
+export interface OwnClassSchedulePage {
+  readonly available: readonly ClassSession[];
+  readonly cursor?: string;
+  readonly reservations: readonly OwnReservationView[];
+}
+
 export interface AdminMembershipReportPage {
   readonly cursor?: string;
   readonly memberships: readonly AdminMembershipView[];
@@ -276,6 +289,7 @@ export interface AuthServiceDependencies {
   readonly plans?: MembershipPlanPort;
   readonly rateLimiter: RateLimiter;
   readonly receipts?: ReceiptUploadPort;
+  readonly reservations?: ReservationPort;
   readonly tokens: CognitoTokenPort;
   readonly users: PendingUserPort;
 }
@@ -500,6 +514,27 @@ const decodeOwnPaymentCursor = (cursor: string | undefined, owner: string): Dyna
   } catch { throw new ApiError(422, apiErrorCodes.validationError, "El cursor de pagos no es válido."); }
 };
 const encodeOwnPaymentCursor = (cursor: DynamoDbKey | undefined, owner: string): string | undefined => cursor === undefined
+  ? undefined
+  : Buffer.from(JSON.stringify({ cursor, owner }), "utf8").toString("base64url");
+const decodeOwnReservationCursor = (cursor: string | undefined, owner: string): DynamoDbKey | undefined => {
+  if (cursor === undefined) return undefined;
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error();
+    const record = value as Record<string, unknown>;
+    if (record.owner !== owner || typeof record.cursor !== "object" || record.cursor === null || Array.isArray(record.cursor)) throw new Error();
+    const key = record.cursor as Record<string, unknown>;
+    if (
+      Object.keys(key).length !== 4 ||
+      typeof key.PK !== "string" || !key.PK.startsWith("CLASS#") ||
+      key.SK !== `RESERVATION#${owner}` ||
+      key.GSI2PK !== `USER#${owner}` ||
+      typeof key.GSI2SK !== "string" || !key.GSI2SK.startsWith("RESERVATION#")
+    ) throw new Error();
+    return key as DynamoDbKey;
+  } catch { throw new ApiError(422, apiErrorCodes.validationError, "El cursor de reservas no es válido."); }
+};
+const encodeOwnReservationCursor = (cursor: DynamoDbKey | undefined, owner: string): string | undefined => cursor === undefined
   ? undefined
   : Buffer.from(JSON.stringify({ cursor, owner }), "utf8").toString("base64url");
 const paymentQueryIdentity = (query: AdminPaymentQuery): string => `${query.filter}:${query.value}`;
@@ -1260,6 +1295,54 @@ export class AuthService {
     }
   }
 
+  async getOwnClassSchedule(
+    request: Request,
+    query: OwnClassScheduleQuery,
+  ): Promise<OwnClassSchedulePage> {
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "own-class-schedule"), 60);
+    try {
+      const scope = new AuthorizedRepositoryScope(principalFromProfile(principal));
+      return await scope.listOwn("RESERVATION_MANAGE_OWN", async (studentId) => {
+        const cursor = decodeOwnReservationCursor(query.cursor, studentId);
+        const [available, reservationPage] = await Promise.all([
+          this.classSessionRepository().listAvailable(query.from, query.to, { limitPerPartition: 100 }),
+          this.reservationRepository().listByStudent(studentId, {
+            ...(cursor === undefined ? {} : { cursor }),
+            limit: 20,
+          }),
+        ]);
+        const classIds = [...new Set(reservationPage.reservations.map(({ classId }) => classId))];
+        const sessions = new Map((await Promise.all(classIds.map(async (classId) => [
+          classId,
+          await this.classSessionRepository().getById(classId, true),
+        ] as const))).filter((entry): entry is readonly [string, ClassSession] => entry[1] !== undefined));
+        const encodedCursor = encodeOwnReservationCursor(reservationPage.cursor, studentId);
+        return {
+          available: available.sessions,
+          ...(encodedCursor === undefined ? {} : { cursor: encodedCursor }),
+          reservations: reservationPage.reservations.map((reservation) => {
+            const own = {
+              classId: reservation.classId,
+              createdAt: reservation.createdAt,
+              id: reservation.id,
+              startsAt: reservation.startsAt,
+              status: reservation.status,
+              updatedAt: reservation.updatedAt,
+              version: reservation.version,
+            };
+            const session = sessions.get(reservation.classId);
+            return session === undefined ? own : { ...own, session };
+          }),
+        };
+      });
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible consultar tus clases y reservas.");
+    }
+  }
+
   async listAdminMemberships(
     request: Request,
     query: MembershipHistoryQuery,
@@ -1753,6 +1836,13 @@ export class AuthService {
       throw new ApiError(500, apiErrorCodes.internalError, "El servicio de reservas no está configurado.");
     }
     return this.dependencies.bookings;
+  }
+
+  private reservationRepository(): ReservationPort {
+    if (this.dependencies.reservations === undefined) {
+      throw new ApiError(500, apiErrorCodes.internalError, "El servicio de reservas no está configurado.");
+    }
+    return this.dependencies.reservations;
   }
 
   private settingsRepository(): GymSettingsPort {

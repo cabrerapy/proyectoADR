@@ -20,7 +20,7 @@ import {
 import { describe, expect, it, vi } from "vitest";
 
 import { resolveAuthConfig, type AuthConfig } from "./auth-config";
-import { AuthService, type BookingPort, type ClassSessionPort, type GymSettingsPort, type MembershipPlanPort, type MembershipPort, type PaymentPort, type PendingUserPort, type SchedulingCatalogPort } from "./auth-service";
+import { AuthService, type BookingPort, type ClassSessionPort, type GymSettingsPort, type MembershipPlanPort, type MembershipPort, type PaymentPort, type PendingUserPort, type ReservationPort, type SchedulingCatalogPort } from "./auth-service";
 import { CognitoTokenClient, type CognitoTokenPort } from "./cognito-client";
 import { oauthCookieNames, sessionCookieName } from "./cookies";
 import { FixedWindowRateLimiter } from "./rate-limiter";
@@ -313,6 +313,7 @@ describe("OAuth session service", () => {
       create: vi.fn(async (input) => { const value: ClassSession = { capacity: input.capacity, classDate: input.classDate, classTypeId: input.classTypeId, classTypeName: input.classTypeName, confirmedCount: 0, createdAt: input.createdAt, createdBy: input.createdBy, endsAt: input.endsAt, id: input.classId, startTime: input.startTime, startsAt: input.startsAt, status: "SCHEDULED", trainerId: input.trainerId, trainerName: input.trainerName, updatedAt: input.createdAt, version: 1 }; classSessionRecords.push(value); return value; }),
       getById: vi.fn(async (id) => classSessionRecords.find((entry) => entry.id === id)),
       listByDate: vi.fn(async (date) => ({ sessions: classSessionRecords.filter((entry) => entry.classDate === date) })),
+      listAvailable: vi.fn(async (from, to) => ({ sessions: classSessionRecords.filter((entry) => entry.classDate >= from && entry.classDate <= to && entry.status === "SCHEDULED" && entry.confirmedCount < entry.capacity) })),
       propagateCancellationBatch: vi.fn(async (input) => { const current = classSessionRecords.find((entry) => entry.id === input.classId); if (current === undefined) throw new Error("missing class"); return { cancelledCount: 0, complete: true, session: current }; }),
       update: vi.fn(async (input) => { const current = classSessionRecords.find((entry) => entry.id === input.classId); if (current === undefined) throw new Error("missing class"); const value: ClassSession = { ...current, capacity: input.capacity, classDate: input.classDate, classTypeId: input.classTypeId, classTypeName: input.classTypeName, endsAt: input.endsAt, startTime: input.startTime, startsAt: input.startsAt, trainerId: input.trainerId, trainerName: input.trainerName, updatedAt: input.updatedAt, version: input.expectedVersion + 1 }; classSessionRecords.splice(classSessionRecords.indexOf(current), 1, value); return value; }),
     };
@@ -344,6 +345,10 @@ describe("OAuth session service", () => {
         } satisfies Reservation,
       })),
     };
+    const reservationRecords: Reservation[] = [];
+    const reservationPort: ReservationPort = {
+      listByStudent: vi.fn(async (studentId) => ({ reservations: reservationRecords.filter((entry) => entry.studentId === studentId) })),
+    };
     const settingsPort: GymSettingsPort = {
       get: vi.fn(async () => ({ cancellationWindowMinutes: 120, currency: "PYG", gymName: "Gym ADR", timezone: "America/Asuncion", updatedAt: "2026-08-08T10:00:00Z", updatedBy: "admin", version: 1 })),
     };
@@ -360,11 +365,12 @@ describe("OAuth session service", () => {
       plans: planPort,
       rateLimiter,
       receipts: receiptPort,
+      reservations: reservationPort,
       settings: settingsPort,
       tokens,
       users: userPort,
     });
-    return { bookingPort, catalogPort, classSessionPort, classSessionRecords, completed, membershipPort, memberships, paymentPort, paymentRecords, planPort, plans, receiptPort, service, settingsPort, tokens, userPort, users };
+    return { bookingPort, catalogPort, classSessionPort, classSessionRecords, completed, membershipPort, memberships, paymentPort, paymentRecords, planPort, plans, receiptPort, reservationPort, reservationRecords, service, settingsPort, tokens, userPort, users };
   };
 
   it("starts authorization with state, nonce, S256 PKCE and hardened cookies", () => {
@@ -1186,6 +1192,29 @@ describe("OAuth session service", () => {
     memberships.set("membership-booking", { ...memberships.get("membership-booking")!, endDate: "2026-08-07" });
     await expect(service.reserveOwnClass(request(), "class-1"))
       .rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+  });
+
+  it("lists only the authenticated student's classes and rejects a foreign reservation cursor", async () => {
+    const { classSessionRecords, completed, reservationPort, reservationRecords, service, userPort } = setup();
+    const actor = { ...identity, createdAt: "2026-08-08T12:00:00Z", userId: "student-schedule" };
+    await userPort.createPending(actor);
+    completed.set(actor.userId, { createdAt: actor.createdAt, displayName: "Alumna", email: actor.email, emailVerified: true, id: actor.userId, roles: ["STUDENT"], status: "ACTIVE", updatedAt: actor.createdAt, version: 2 });
+    classSessionRecords.push({ capacity: 12, classDate: "2026-08-10", classTypeId: "type-1", classTypeName: "Cross training", confirmedCount: 3, createdAt: actor.createdAt, createdBy: "staff", endsAt: "2026-08-10T23:00:00.000Z", id: "class-own", startTime: "19:00:00", startsAt: "2026-08-10T22:00:00.000Z", status: "SCHEDULED", trainerId: "trainer-1", trainerName: "Entrenador", updatedAt: actor.createdAt, version: 1 });
+    reservationRecords.push(
+      { classId: "class-own", createdAt: actor.createdAt, id: "reservation-own", startsAt: "2026-08-10T22:00:00.000Z", status: "CONFIRMED", studentId: actor.userId, updatedAt: actor.createdAt, version: 1 },
+      { classId: "class-foreign", createdAt: actor.createdAt, id: "reservation-foreign", startsAt: "2026-08-11T22:00:00.000Z", status: "CONFIRMED", studentId: "other", updatedAt: actor.createdAt, version: 1 },
+    );
+    const request = new Request("https://app.example.com/api/v1/me/classes", { headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token` } });
+
+    await expect(service.getOwnClassSchedule(request, { from: "2026-08-08", to: "2026-08-22" })).resolves.toMatchObject({
+      available: [{ id: "class-own" }],
+      reservations: [{ classId: "class-own", id: "reservation-own", session: { id: "class-own" } }],
+    });
+    expect(reservationPort.listByStudent).toHaveBeenCalledWith(actor.userId, expect.objectContaining({ limit: 20 }));
+    const foreignCursor = Buffer.from(JSON.stringify({ cursor: { GSI2PK: "USER#other", GSI2SK: "RESERVATION#2026-08-11T22:00:00.000Z#CLASS#class-foreign", PK: "CLASS#class-foreign", SK: "RESERVATION#other" }, owner: "other" }), "utf8").toString("base64url");
+    await expect(service.getOwnClassSchedule(request, { cursor: foreignCursor, from: "2026-08-08", to: "2026-08-22" })).rejects.toMatchObject({ status: 422 });
+    completed.set(actor.userId, { ...completed.get(actor.userId)!, status: "SUSPENDED" });
+    await expect(service.getOwnClassSchedule(request, { from: "2026-08-08", to: "2026-08-22" })).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
   });
 
   it("allows only active ADMIN to create linked, idempotent payment corrections", async () => {

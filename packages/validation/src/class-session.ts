@@ -9,6 +9,7 @@ export interface ClassSessionCommand {
 }
 export interface UpdateClassSessionCommand extends ClassSessionCommand { readonly expectedVersion: number }
 export interface ClassSessionQuery { readonly date: string }
+export interface OwnClassScheduleQuery { readonly cursor?: string; readonly from: string; readonly to: string }
 export interface CancelClassSessionCommand { readonly cursor?: string; readonly expectedVersion: number; readonly reason: string }
 
 const issue = (path: string, message: string): ValidationIssue => ({ code: "INVALID_CLASS_SESSION_FIELD", message, path: [path] });
@@ -53,4 +54,19 @@ export const validateClassSessionQuery = (params: URLSearchParams): ValidationRe
   const issues: ValidationIssue[] = [...params.keys()].some((key) => key !== "date") ? [issue("$", "La consulta incluye parámetros no permitidos.")] : [];
   const parsed = date(params.get("date")); if (parsed === undefined) issues.push(issue("date", "La fecha no es válida."));
   return result(issues, { date: parsed ?? "" });
+};
+
+export const validateOwnClassScheduleQuery = (params: URLSearchParams): ValidationResult<OwnClassScheduleQuery> => {
+  const issues: ValidationIssue[] = [...params.keys()].some((key) => !["cursor", "from", "to"].includes(key)) ? [issue("$", "La consulta incluye parámetros no permitidos.")] : [];
+  const from = date(params.get("from")); const to = date(params.get("to"));
+  const rawCursor = params.get("cursor");
+  const cursor = rawCursor === null ? undefined : /^[A-Za-z0-9_-]{1,4096}$/u.test(rawCursor) ? rawCursor : undefined;
+  if (from === undefined) issues.push(issue("from", "La fecha inicial no es válida."));
+  if (to === undefined) issues.push(issue("to", "La fecha final no es válida."));
+  if (from !== undefined && to !== undefined) {
+    const days = (Date.parse(`${to}T00:00:00.000Z`) - Date.parse(`${from}T00:00:00.000Z`)) / 86_400_000;
+    if (days < 0 || days > 31) issues.push(issue("to", "El periodo debe contener entre 1 y 32 días."));
+  }
+  if (rawCursor !== null && cursor === undefined) issues.push(issue("cursor", "El cursor no es válido."));
+  return result(issues, { ...(cursor === undefined ? {} : { cursor }), from: from ?? "", to: to ?? "" });
 };

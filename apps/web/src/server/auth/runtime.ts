@@ -12,6 +12,7 @@ import {
   MembershipRepository,
   MembershipPlanRepository,
   PaymentRepository,
+  ReservationRepository,
   SchedulingCatalogRepository,
   SearchTokenService,
   UserRepository,
@@ -132,6 +133,7 @@ const createService = async (): Promise<AuthService> => {
     plans: new MembershipPlanRepository(adapter, tableName),
     tokens: new CognitoTokenClient(config),
     receipts,
+    reservations: new ReservationRepository(adapter, tableName),
     settings: new GymSettingsRepository(adapter, tableName),
     users,
   });
