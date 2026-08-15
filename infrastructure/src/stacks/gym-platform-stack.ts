@@ -13,6 +13,7 @@ import { GalleryStorage, galleryOriginalsPrefix } from "../gallery/gallery-stora
 import { GalleryImageWorker } from "../gallery/gallery-image-worker.js";
 import { NotificationDelivery } from "../notifications/notification-delivery.js";
 import { ExpiryReminderSchedule } from "../notifications/expiry-reminder-schedule.js";
+import { DynamoDbMonitoring } from "../monitoring/dynamodb-monitoring.js";
 
 export interface GymPlatformStackProps extends StackProps {
   readonly environmentConfig: EnvironmentConfig;
@@ -22,6 +23,7 @@ export interface GymPlatformStackProps extends StackProps {
 export class GymPlatformStack extends Stack {
   readonly cognitoAuth: CognitoAuth;
   readonly dynamoDbTable: DynamoDbTable;
+  readonly dynamoDbMonitoring: DynamoDbMonitoring;
   readonly environmentConfig: EnvironmentConfig;
   readonly galleryStorage: GalleryStorage;
   readonly galleryImageWorker: GalleryImageWorker;
@@ -49,6 +51,11 @@ export class GymPlatformStack extends Stack {
     );
     this.dynamoDbTable = new DynamoDbTable(this, "DynamoDbTable", {
       encryptionKey: this.securityFoundation.encryptionKey,
+      environmentConfig: props.environmentConfig,
+    });
+    this.dynamoDbMonitoring = new DynamoDbMonitoring(this, "DynamoDbMonitoring", {
+      alertsTopic: this.securityFoundation.operationalAlertsTopic,
+      dynamoDbTable: this.dynamoDbTable,
       environmentConfig: props.environmentConfig,
     });
     this.webHosting = new WebHosting(this, "WebHosting", {

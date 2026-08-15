@@ -42,6 +42,10 @@ describe("DynamoDB table", () => {
       template.resourceCountIs("AWS::DynamoDB::Table", 1);
       template.hasResourceProperties("AWS::DynamoDB::Table", {
         BillingMode: "PAY_PER_REQUEST",
+        OnDemandThroughput: {
+          MaxReadRequestUnits: environment === "local" ? 100 : environment === "development" ? 500 : 2000,
+          MaxWriteRequestUnits: environment === "local" ? 100 : environment === "development" ? 500 : 2000,
+        },
         KeySchema: primaryKey,
         TimeToLiveSpecification: {
           AttributeName: "expiresAt",

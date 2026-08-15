@@ -27,4 +27,16 @@ describe("Next.js public delivery configuration", () => {
     expect(cacheValue("/me/:path*")).toBe("private, no-store, max-age=0");
     expect(cacheValue("/admin/:path*")).toBe("private, no-store, max-age=0");
   });
+
+  it("applies browser security headers to every route", async () => {
+    const headers = await nextConfig.headers?.();
+    const security = headers?.find((entry) => entry.source === "/:path*")?.headers ?? [];
+    expect(Object.fromEntries(security.map(({ key, value }) => [key, value]))).toMatchObject({
+      "Content-Security-Policy": expect.stringContaining("frame-ancestors 'none'"),
+      "Permissions-Policy": "camera=(), geolocation=(), microphone=(), payment=()",
+      "Referrer-Policy": "strict-origin-when-cross-origin",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY",
+    });
+  });
 });

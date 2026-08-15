@@ -41,6 +41,8 @@ export class DynamoDbTable extends Construct {
 
     this.table = new Table(this, "Table", {
       billingMode: BillingMode.PAY_PER_REQUEST,
+      maxReadRequestUnits: environmentConfig.dynamoDbMaxReadRequestUnits,
+      maxWriteRequestUnits: environmentConfig.dynamoDbMaxWriteRequestUnits,
       deletionProtection: isProduction,
       encryption: TableEncryption.CUSTOMER_MANAGED,
       encryptionKey: props.encryptionKey,

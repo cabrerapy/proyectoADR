@@ -2,6 +2,9 @@ import { createHash, randomUUID } from "node:crypto";
 
 import {
   DynamoDbRepositoryError,
+  ENTITY_TYPES,
+  type AuditLogRepository,
+  type EntityType,
   type CompletePendingProfileInput,
   type CreateMembershipPlanInput,
   type CreateMembershipInput,
@@ -41,6 +44,7 @@ import {
   type HideGalleryAssetInput,
   type PublicGalleryPage,
   type PublishGalleryAssetInput,
+  type SaveGymSettingsInput,
 } from "@gym-adr/data-access";
 import {
   USER_STATUSES,
@@ -57,6 +61,7 @@ import {
   type ClassType,
   type ClassSession,
   type GymSettings,
+  type AuditLog,
   type GalleryAsset,
   type PhotoConsent,
   type Reservation,
@@ -94,6 +99,8 @@ import type {
   GalleryUploadCommand,
   GalleryConsentCommand,
   GalleryPublicationCommand,
+  GymSettingsCommand,
+  AuditQuery,
 } from "@gym-adr/validation";
 
 import { ApiError, apiErrorCodes } from "../http/api-error";
@@ -193,8 +200,12 @@ export interface BookingPort {
 }
 
 export interface GymSettingsPort {
+  create(input: SaveGymSettingsInput): Promise<GymSettings>;
   get(): Promise<GymSettings | undefined>;
+  update(input: SaveGymSettingsInput & { readonly expectedVersion: number }): Promise<GymSettings>;
 }
+
+export type AuditPort = Pick<AuditLogRepository, "listByActor" | "listByEntity">;
 
 export interface GalleryPort {
   createConsent(input: CreatePhotoConsentInput): Promise<PhotoConsent>;
@@ -312,6 +323,7 @@ export interface SchedulingCatalogViewPage {
 }
 
 export interface AuthServiceDependencies {
+  readonly audit?: AuditPort;
   readonly bookings?: BookingPort;
   readonly clock?: () => Date;
   readonly config: AuthConfig;
@@ -634,6 +646,20 @@ const decodeClassCancellationCursor = (cursor: string | undefined, classId: stri
 const encodeClassCancellationCursor = (cursor: DynamoDbKey | undefined, classId: string, requestKey: string): string | undefined => cursor === undefined
   ? undefined
   : Buffer.from(JSON.stringify({ cursor, identity: classCancellationIdentity(classId, requestKey) }), "utf8").toString("base64url");
+const decodeAuditCursor = (value: string | undefined, identity: string): DynamoDbKey | undefined => {
+  if (value === undefined) return undefined;
+  try {
+    const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as { cursor?: unknown; identity?: unknown };
+    if (decoded.identity !== identity || typeof decoded.cursor !== "object" || decoded.cursor === null || Array.isArray(decoded.cursor)) throw new Error("invalid");
+    return decoded.cursor as DynamoDbKey;
+  } catch { throw new ApiError(422, apiErrorCodes.validationError, "El cursor de auditoría no es válido."); }
+};
+const encodeAuditCursor = (cursor: DynamoDbKey | undefined, identity: string): string | undefined => cursor === undefined ? undefined : Buffer.from(JSON.stringify({ cursor, identity }), "utf8").toString("base64url");
+const auditEntityType = (value: string): EntityType => {
+  const type = ENTITY_TYPES.find((candidate) => candidate === value);
+  if (type === undefined) throw new ApiError(422, apiErrorCodes.validationError, "El tipo de entidad no es válido.");
+  return type;
+};
 
 export class AuthService {
   private readonly clock: () => Date;
@@ -658,11 +684,68 @@ export class AuthService {
         { description: "Entrenadores y tipos de clase.", href: "/admin/class-catalog", label: "Catálogo de clases" },
         { description: "Calendario, cupos y cancelaciones.", href: "/admin/class-sessions", label: "Sesiones" },
         { description: "Carga, consentimiento, publicación y ocultamiento.", href: "/admin/gallery", label: "Galería" },
+        ...(role === "ADMIN" ? [{ description: "Parámetros operativos versionados del gimnasio.", href: "/admin/settings", label: "Configuración" }] : []),
+        ...(role === "ADMIN" ? [{ description: "Acciones administrativas por actor o entidad.", href: "/admin/audit", label: "Auditoría" }] : []),
       ] as const;
       return { links, role };
     } catch (error) {
       this.rethrowAuthorization(error);
       throw new ApiError(502, apiErrorCodes.internalError, "No fue posible abrir el panel administrativo.");
+    }
+  }
+
+  async getAdminSettings(request: Request): Promise<GymSettings | undefined> {
+    const principal = await this.authenticate(request);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("SETTINGS_MANAGE");
+      return await this.settingsRepository().get();
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible consultar la configuración.");
+    }
+  }
+
+  async saveAdminSettings(request: Request, correlationId: string, input: GymSettingsCommand): Promise<GymSettings> {
+    this.assertSameOrigin(request);
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "settings-write"), 10);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("SETTINGS_MANAGE");
+      const command = {
+        ...input,
+        auditId: this.ids(),
+        correlationId,
+        updatedAt: this.clock().toISOString(),
+        updatedBy: principal.id,
+      };
+      return input.expectedVersion === undefined
+        ? await this.settingsRepository().create(command)
+        : await this.settingsRepository().update({ ...command, expectedVersion: input.expectedVersion });
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof DynamoDbRepositoryError && (error.code === "TRANSACTION_CANCELLED" || error.code === "CONDITIONAL_CHECK_FAILED")) {
+        throw new ApiError(409, apiErrorCodes.conflict, "La configuración cambió. Actualiza la página antes de reintentar.");
+      }
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible guardar la configuración.");
+    }
+  }
+
+  async listAdminAudit(request: Request, query: AuditQuery): Promise<{ readonly cursor?: string; readonly entries: readonly AuditLog[] }> {
+    const principal = await this.authenticate(request);
+    try {
+      new AuthorizedRepositoryScope(principalFromProfile(principal)).require("AUDIT_READ");
+      const identity = JSON.stringify({ from: query.from, mode: query.mode, subject: query.mode === "ACTOR" ? query.actorId : `${query.targetType}:${query.targetId}`, to: query.to });
+      const cursor = decodeAuditCursor(query.cursor, identity);
+      const options = { ...(cursor === undefined ? {} : { cursor }), limit: 25 };
+      const page = query.mode === "ACTOR"
+        ? await this.auditRepository().listByActor(query.actorId, query.from, query.to, options)
+        : await this.auditRepository().listByEntity(auditEntityType(query.targetType), query.targetId, query.from, query.to, options);
+      const nextCursor = encodeAuditCursor(page.cursor, identity);
+      return { entries: page.entries, ...(nextCursor === undefined ? {} : { cursor: nextCursor }) };
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible consultar la auditoría.");
     }
   }
 
@@ -2029,6 +2112,11 @@ export class AuthService {
       throw new ApiError(500, apiErrorCodes.internalError, "El servicio de configuración no está configurado.");
     }
     return this.dependencies.settings;
+  }
+
+  private auditRepository(): AuditPort {
+    if (this.dependencies.audit === undefined) throw new ApiError(500, apiErrorCodes.internalError, "El servicio de auditoría no está configurado.");
+    return this.dependencies.audit;
   }
 
   private membershipRepository(): MembershipPort {

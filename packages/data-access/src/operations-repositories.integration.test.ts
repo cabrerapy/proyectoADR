@@ -115,16 +115,16 @@ describe.skipIf(!enabled)("TASK-017 repositories with DynamoDB Local", () => {
   });
 
   it("uses conditional versions for settings and append-only audit queries", async () => {
-    await settings.create({ cancellationWindowMinutes: 120, currency: "PYG", gymName: "Gym ADR", timezone: "America/Asuncion", updatedAt: "2026-08-08T14:00:00Z", updatedBy: "admin-001", whatsappNumber: "+595981000000" });
-    const updated = await settings.update({ cancellationWindowMinutes: 180, currency: "PYG", expectedVersion: 1, gymName: "Gym ADR", timezone: "America/Asuncion", updatedAt: "2026-08-08T14:05:00Z", updatedBy: "admin-001" });
+    await settings.create({ auditId: "audit-settings-create", cancellationWindowMinutes: 120, correlationId: "request-settings-create", currency: "PYG", gymName: "Gym ADR", timezone: "America/Asuncion", updatedAt: "2026-08-08T14:00:00Z", updatedBy: "admin-001", whatsappNumber: "+595981000000" });
+    const updated = await settings.update({ auditId: "audit-settings-update", cancellationWindowMinutes: 180, correlationId: "request-settings-update", currency: "PYG", expectedVersion: 1, gymName: "Gym ADR", timezone: "America/Asuncion", updatedAt: "2026-08-08T14:05:00Z", updatedBy: "admin-001" });
     expect(updated.version).toBe(2);
-    await expect(settings.update({ cancellationWindowMinutes: 60, currency: "PYG", expectedVersion: 1, gymName: "Gym ADR", timezone: "America/Asuncion", updatedAt: "2026-08-08T14:10:00Z", updatedBy: "admin-002" })).rejects.toMatchObject({ code: "TRANSACTION_CANCELLED" });
+    await expect(settings.update({ auditId: "audit-settings-conflict", cancellationWindowMinutes: 60, correlationId: "request-settings-conflict", currency: "PYG", expectedVersion: 1, gymName: "Gym ADR", timezone: "America/Asuncion", updatedAt: "2026-08-08T14:10:00Z", updatedBy: "admin-002" })).rejects.toMatchObject({ code: "TRANSACTION_CANCELLED" });
 
     await audit.append({ action: "SETTINGS_UPDATED", actorId: "admin-001", auditId: "audit-001", correlationId: "request-001", details: { cancellationWindowMinutes: 180 }, result: "SUCCEEDED", targetId: "gym", targetType: "GymSettings", timestamp: "2026-08-08T14:05:00Z" });
     await expect(audit.append({ action: "SETTINGS_UPDATED", actorId: "admin-001", auditId: "audit-001", correlationId: "request-001", result: "SUCCEEDED", targetId: "gym", targetType: "GymSettings", timestamp: "2026-08-08T14:05:00Z" })).rejects.toMatchObject({ code: "CONDITIONAL_CHECK_FAILED" });
     const byEntity = await audit.listByEntity("GymSettings", "gym", "2026-08-08T00:00:00Z", "2026-08-08T23:59:59Z");
     const byActor = await audit.listByActor("admin-001", "2026-08-08T00:00:00Z", "2026-08-08T23:59:59Z");
-    expect(byEntity.entries).toHaveLength(1);
-    expect(byActor.entries).toHaveLength(1);
+    expect(byEntity.entries.map(({ action }) => action)).toEqual(["SETTINGS_CREATED", "SETTINGS_UPDATED", "SETTINGS_UPDATED"]);
+    expect(byActor.entries).toHaveLength(3);
   });
 });

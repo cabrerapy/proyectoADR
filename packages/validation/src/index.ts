@@ -21,3 +21,5 @@ export * from "./profile";
 export * from "./scheduling-catalog";
 export * from "./class-session";
 export * from "./gallery";
+export * from "./gym-settings";
+export * from "./audit";

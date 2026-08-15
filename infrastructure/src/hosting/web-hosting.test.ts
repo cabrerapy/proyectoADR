@@ -129,6 +129,20 @@ describe("OpenNext web hosting", () => {
     });
   });
 
+  it("enforces security headers at CloudFront without a regional WAF dependency", () => {
+    const template = synthesize();
+    template.hasResourceProperties("AWS::CloudFront::ResponseHeadersPolicy", {
+      ResponseHeadersPolicyConfig: Match.objectLike({
+        CustomHeadersConfig: Match.objectLike({ Items: Match.arrayWith([Match.objectLike({ Header: "Permissions-Policy", Override: true })]) }),
+        SecurityHeadersConfig: Match.objectLike({
+          ContentTypeOptions: { Override: true },
+          FrameOptions: { FrameOption: "DENY", Override: true },
+        }),
+      }),
+    });
+    template.resourceCountIs("AWS::WAFv2::WebACL", 0);
+  });
+
   it("grants the server only the DynamoDB operations required by implemented routes", () => {
     const template = synthesize().toJSON();
     const serialized = JSON.stringify(template);

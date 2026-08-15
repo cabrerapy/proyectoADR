@@ -48,7 +48,7 @@ describe("TASK-017 persistence guards", () => {
   it("accepts only explicit public settings and Paraguay MVP defaults", async () => {
     const document = port();
     const repository = new GymSettingsRepository(document, "gym-adr-platform-local");
-    await expect(repository.create({ cancellationWindowMinutes: 120, currency: "PYG", gymName: "Gym ADR", timezone: "UTC", updatedAt: "2026-08-08T12:00:00Z", updatedBy: "admin-1" })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(repository.create({ auditId: "audit-settings", cancellationWindowMinutes: 120, correlationId: "request-settings", currency: "PYG", gymName: "Gym ADR", timezone: "UTC", updatedAt: "2026-08-08T12:00:00Z", updatedBy: "admin-1" })).rejects.toMatchObject({ code: "INVALID_INPUT" });
     expect(document.put).not.toHaveBeenCalled();
   });
 });

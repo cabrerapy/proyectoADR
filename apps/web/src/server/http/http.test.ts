@@ -52,6 +52,8 @@ describe("BFF HTTP boundary", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("x-frame-options")).toBe("DENY");
     expect(response.headers.get(correlationIdHeader)).toMatch(
       /^[0-9a-f-]{36}$/u,
     );

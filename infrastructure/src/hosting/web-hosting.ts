@@ -12,6 +12,9 @@ import {
   HttpVersion,
   OriginRequestPolicy,
   PriceClass,
+  ResponseHeadersPolicy,
+  HeadersFrameOption,
+  HeadersReferrerPolicy,
   ViewerProtocolPolicy,
 } from "aws-cdk-lib/aws-cloudfront";
 import {
@@ -136,8 +139,23 @@ export class WebHosting extends Construct {
       viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
     } as const;
 
+    const responseHeadersPolicy = new ResponseHeadersPolicy(this, "SecurityHeaders", {
+      customHeadersBehavior: { customHeaders: [
+        { header: "Content-Security-Policy", override: true, value: "default-src 'self'; base-uri 'self'; connect-src 'self' https://*.amazoncognito.com; font-src 'self'; form-action 'self' https://*.amazoncognito.com; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; upgrade-insecure-requests" },
+        { header: "Permissions-Policy", override: true, value: "camera=(), geolocation=(), microphone=(), payment=()" },
+      ] },
+      responseHeadersPolicyName: `gym-adr-${environmentConfig.name}-security`,
+      securityHeadersBehavior: {
+        contentTypeOptions: { override: true },
+        frameOptions: { frameOption: HeadersFrameOption.DENY, override: true },
+        referrerPolicy: { override: true, referrerPolicy: HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN },
+        strictTransportSecurity: { accessControlMaxAge: Duration.days(365), includeSubdomains: true, override: true },
+      },
+    });
+    const securedDynamicBehavior = { ...dynamicBehavior, responseHeadersPolicy };
+
     this.distribution = new Distribution(this, "Distribution", {
-      defaultBehavior: dynamicBehavior,
+      defaultBehavior: securedDynamicBehavior,
       httpVersion: HttpVersion.HTTP2_AND_3,
       priceClass: PriceClass.PRICE_CLASS_100,
     });
@@ -150,6 +168,7 @@ export class WebHosting extends Construct {
         allowedMethods: AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
         cachePolicy: CachePolicy.CACHING_OPTIMIZED,
         compress: true,
+        responseHeadersPolicy,
         viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
       },
     );
@@ -161,6 +180,7 @@ export class WebHosting extends Construct {
         cachePolicy: CachePolicy.CACHING_DISABLED,
         compress: true,
         originRequestPolicy: OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+        responseHeadersPolicy,
         viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
       },
     );

@@ -20,7 +20,7 @@ import {
 import { describe, expect, it, vi } from "vitest";
 
 import { resolveAuthConfig, type AuthConfig } from "./auth-config";
-import { AuthService, type BookingPort, type ClassSessionPort, type GalleryPort, type GymSettingsPort, type MembershipPlanPort, type MembershipPort, type PaymentPort, type PendingUserPort, type ReservationPort, type SchedulingCatalogPort } from "./auth-service";
+import { AuthService, type AuditPort, type BookingPort, type ClassSessionPort, type GalleryPort, type GymSettingsPort, type MembershipPlanPort, type MembershipPort, type PaymentPort, type PendingUserPort, type ReservationPort, type SchedulingCatalogPort } from "./auth-service";
 import { CognitoTokenClient, type CognitoTokenPort } from "./cognito-client";
 import { oauthCookieNames, sessionCookieName } from "./cookies";
 import { FixedWindowRateLimiter } from "./rate-limiter";
@@ -377,10 +377,17 @@ describe("OAuth session service", () => {
       listByStudent: vi.fn(async (studentId) => ({ reservations: reservationRecords.filter((entry) => entry.studentId === studentId) })),
     };
     const settingsPort: GymSettingsPort = {
+      create: vi.fn(async (input) => ({ ...input, version: 1 })),
       get: vi.fn(async () => ({ cancellationWindowMinutes: 120, currency: "PYG", gymName: "Gym ADR", timezone: "America/Asuncion", updatedAt: "2026-08-08T10:00:00Z", updatedBy: "admin", version: 1 })),
+      update: vi.fn(async (input) => ({ ...input, version: input.expectedVersion + 1 })),
+    };
+    const auditPort: AuditPort = {
+      listByActor: vi.fn(async () => ({ entries: [{ action: "SETTINGS_UPDATED", actorId: "audit-admin", correlationId: "request-audit", details: {}, id: "audit-entry", result: "SUCCEEDED" as const, targetId: "gym", targetType: "GymSettings" as const, timestamp: "2026-08-14T12:00:00Z" }] })),
+      listByEntity: vi.fn(async () => ({ entries: [] })),
     };
     let sequence = 0;
     const service = new AuthService({
+      audit: auditPort,
       bookings: bookingPort,
       clock: () => new Date("2026-08-08T12:00:00Z"),
       catalog: catalogPort,
@@ -399,7 +406,7 @@ describe("OAuth session service", () => {
       tokens,
       users: userPort,
     });
-    return { bookingPort, catalogPort, classSessionPort, classSessionRecords, completed, galleryPort, galleryUploadPort, membershipPort, memberships, paymentPort, paymentRecords, planPort, plans, receiptPort, reservationPort, reservationRecords, service, settingsPort, tokens, userPort, users };
+    return { auditPort, bookingPort, catalogPort, classSessionPort, classSessionRecords, completed, galleryPort, galleryUploadPort, membershipPort, memberships, paymentPort, paymentRecords, planPort, plans, receiptPort, reservationPort, reservationRecords, service, settingsPort, tokens, userPort, users };
   };
 
   it("starts authorization with state, nonce, S256 PKCE and hardened cookies", () => {
@@ -1270,6 +1277,32 @@ describe("OAuth session service", () => {
     await expect(service.getAdminDashboard(request)).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
     completed.set(actor.userId, { ...profile, status: "SUSPENDED" });
     await expect(service.getAdminDashboard(request)).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+  });
+
+  it("allows only an active ADMIN to update versioned gym settings", async () => {
+    const { completed, service, settingsPort, userPort } = setup();
+    const actor = { ...identity, createdAt: "2026-08-14T12:00:00Z", userId: "settings-admin" };
+    await userPort.createPending(actor);
+    const profile = { createdAt: actor.createdAt, displayName: "Administradora", email: actor.email, emailVerified: true, id: actor.userId, roles: ["ADMIN"] as const, status: "ACTIVE" as const, updatedAt: actor.createdAt, version: 2 };
+    completed.set(actor.userId, profile);
+    const request = new Request("https://app.example.com/api/v1/admin/settings", { headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token`, origin: config.appBaseUrl }, method: "PUT" });
+    await expect(service.saveAdminSettings(request, "settings-correlation", { cancellationWindowMinutes: 180, currency: "PYG", expectedVersion: 1, gymName: "Gym ADR", timezone: "America/Asuncion" })).resolves.toMatchObject({ updatedBy: actor.userId, version: 2 });
+    expect(settingsPort.update).toHaveBeenCalledWith(expect.objectContaining({ auditId: expect.any(String), correlationId: "settings-correlation", updatedBy: actor.userId }));
+    completed.set(actor.userId, { ...profile, roles: ["STAFF"] });
+    await expect(service.saveAdminSettings(request, "settings-denied", { cancellationWindowMinutes: 60, currency: "PYG", expectedVersion: 2, gymName: "Gym ADR", timezone: "America/Asuncion" })).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+  });
+
+  it("lists sanitized audit entries only for an active ADMIN", async () => {
+    const { auditPort, completed, service, userPort } = setup();
+    const actor = { ...identity, createdAt: "2026-08-14T12:00:00Z", userId: "audit-admin" };
+    await userPort.createPending(actor);
+    const profile = { createdAt: actor.createdAt, displayName: "Administradora", email: actor.email, emailVerified: true, id: actor.userId, roles: ["ADMIN"] as const, status: "ACTIVE" as const, updatedAt: actor.createdAt, version: 2 };
+    completed.set(actor.userId, profile);
+    const request = new Request("https://app.example.com/api/v1/admin/audit", { headers: { cookie: `${sessionCookieName(config.environment)}=signed-id-token` } });
+    await expect(service.listAdminAudit(request, { actorId: actor.userId, from: "2026-08-01T00:00:00Z", mode: "ACTOR", to: "2026-08-31T23:59:59Z" })).resolves.toMatchObject({ entries: [expect.objectContaining({ action: "SETTINGS_UPDATED" })] });
+    expect(auditPort.listByActor).toHaveBeenCalledWith(actor.userId, expect.any(String), expect.any(String), expect.objectContaining({ limit: 25 }));
+    completed.set(actor.userId, { ...profile, roles: ["STAFF"] });
+    await expect(service.listAdminAudit(request, { actorId: actor.userId, from: "2026-08-01T00:00:00Z", mode: "ACTOR", to: "2026-08-31T23:59:59Z" })).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
   });
 
   it("lists only the authenticated student's classes and rejects a foreign reservation cursor", async () => {

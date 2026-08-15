@@ -31,6 +31,10 @@ const withStandardHeaders = (
 ): Response => {
   const headers = new Headers(response.headers);
   headers.set(correlationIdHeader, correlationId);
+  headers.set("permissions-policy", "camera=(), geolocation=(), microphone=(), payment=()");
+  headers.set("referrer-policy", "strict-origin-when-cross-origin");
+  headers.set("x-content-type-options", "nosniff");
+  headers.set("x-frame-options", "DENY");
 
   if (!headers.has("cache-control")) {
     headers.set("cache-control", "no-store");
@@ -65,6 +69,10 @@ const errorResponse = (error: unknown, correlationId: string): Response => {
   return Response.json(payload, {
     headers: {
       "cache-control": "no-store",
+      "permissions-policy": "camera=(), geolocation=(), microphone=(), payment=()",
+      "referrer-policy": "strict-origin-when-cross-origin",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
       [correlationIdHeader]: correlationId,
     },
     status: apiError.status,

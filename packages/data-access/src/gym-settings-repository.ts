@@ -1,5 +1,7 @@
 import type { GymSettings } from "@gym-adr/domain";
+import type { TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 
+import { AuditLogRepository } from "./audit-log-repository";
 import { BaseDynamoDbRepository } from "./base-repository";
 import type { DynamoDbDocumentPort, DynamoDbItem } from "./dynamodb-adapter";
 import { invalidDynamoDbInput, mapDynamoDbError } from "./dynamodb-errors";
@@ -9,7 +11,9 @@ import { CURRENT_SCHEMA_VERSION } from "./model-types";
 import { operationId, operationText, operationTimestamp, positiveInteger } from "./operations-validation";
 
 export interface SaveGymSettingsInput {
+  readonly auditId: string;
   readonly cancellationWindowMinutes: number;
+  readonly correlationId: string;
   readonly currency: string;
   readonly gymName: string;
   readonly timezone: string;
@@ -33,7 +37,10 @@ export class GymSettingsRepository {
 
   async create(input: SaveGymSettingsInput): Promise<GymSettings> {
     const settings = this.validate(input, 1);
-    await this.document.put({ ConditionExpression: "attribute_not_exists(#pk) AND attribute_not_exists(#sk)", ExpressionAttributeNames: { "#pk": "PK", "#sk": "SK" }, Item: this.item(settings), TableName: this.table });
+    await this.document.transactWrite({ TransactItems: [
+      { Put: { ConditionExpression: "attribute_not_exists(#pk) AND attribute_not_exists(#sk)", ExpressionAttributeNames: { "#pk": "PK", "#sk": "SK" }, Item: this.item(settings), TableName: this.table } },
+      this.auditAction(settings, input, "SETTINGS_CREATED"),
+    ] });
     return settings;
   }
 
@@ -41,9 +48,26 @@ export class GymSettingsRepository {
     if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) throw invalidDynamoDbInput("expectedVersion no es válida.");
     const settings = this.validate(input, input.expectedVersion + 1);
     try {
-      await this.document.transactWrite({ TransactItems: [{ Put: { ConditionExpression: "#entityType = :settings AND #version = :expectedVersion", ExpressionAttributeNames: { "#entityType": "entityType", "#version": "version" }, ExpressionAttributeValues: { ":expectedVersion": input.expectedVersion, ":settings": "GymSettings" }, Item: this.item(settings), TableName: this.table } }] });
+      await this.document.transactWrite({ TransactItems: [
+        { Put: { ConditionExpression: "#entityType = :settings AND #version = :expectedVersion", ExpressionAttributeNames: { "#entityType": "entityType", "#version": "version" }, ExpressionAttributeValues: { ":expectedVersion": input.expectedVersion, ":settings": "GymSettings" }, Item: this.item(settings), TableName: this.table } },
+        this.auditAction(settings, input, "SETTINGS_UPDATED"),
+      ] });
     } catch (error) { throw mapDynamoDbError(error); }
     return settings;
+  }
+
+  private auditAction(settings: GymSettings, input: SaveGymSettingsInput, action: string): NonNullable<TransactWriteCommandInput["TransactItems"]>[number] {
+    return new AuditLogRepository(this.document, this.table).createAppendAction({
+      action,
+      actorId: settings.updatedBy,
+      auditId: input.auditId,
+      correlationId: input.correlationId,
+      details: { cancellationWindowMinutes: settings.cancellationWindowMinutes, currency: settings.currency, version: settings.version },
+      result: "SUCCEEDED",
+      targetId: "gym",
+      targetType: "GymSettings",
+      timestamp: settings.updatedAt,
+    }).action;
   }
 
   private validate(input: SaveGymSettingsInput, version: number): GymSettings {

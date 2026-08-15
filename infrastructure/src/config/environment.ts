@@ -8,6 +8,8 @@ export type DeploymentEnvironmentName =
   (typeof deploymentEnvironmentNames)[number];
 
 export interface EnvironmentConfig {
+  readonly dynamoDbMaxReadRequestUnits: number;
+  readonly dynamoDbMaxWriteRequestUnits: number;
   readonly name: DeploymentEnvironmentName;
   readonly logRetentionDays: 30 | 90;
   readonly monthlyBudgetUsd: number;
@@ -17,6 +19,8 @@ export interface EnvironmentConfig {
 
 const environmentConfigs = {
   local: {
+    dynamoDbMaxReadRequestUnits: 100,
+    dynamoDbMaxWriteRequestUnits: 100,
     name: "local",
     logRetentionDays: 30,
     monthlyBudgetUsd: 5,
@@ -24,6 +28,8 @@ const environmentConfigs = {
     terminationProtection: false,
   },
   development: {
+    dynamoDbMaxReadRequestUnits: 500,
+    dynamoDbMaxWriteRequestUnits: 500,
     name: "development",
     logRetentionDays: 30,
     monthlyBudgetUsd: 25,
@@ -31,6 +37,8 @@ const environmentConfigs = {
     terminationProtection: false,
   },
   production: {
+    dynamoDbMaxReadRequestUnits: 2_000,
+    dynamoDbMaxWriteRequestUnits: 2_000,
     name: "production",
     logRetentionDays: 90,
     monthlyBudgetUsd: 100,
