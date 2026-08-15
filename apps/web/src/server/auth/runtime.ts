@@ -6,6 +6,7 @@ import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { S3Client } from "@aws-sdk/client-s3";
 import {
   createDynamoDbAdapter,
+  BookingRepository,
   ClassSessionRepository,
   MembershipRepository,
   MembershipPlanRepository,
@@ -120,6 +121,7 @@ const createService = async (): Promise<AuthService> => {
         return new S3ReceiptUploadSigner(new S3Client({ region }), bucket);
       })();
   return new AuthService({
+    bookings: new BookingRepository(adapter, tableName),
     catalog: new SchedulingCatalogRepository(adapter, tableName),
     classSessions: new ClassSessionRepository(adapter, tableName),
     config,

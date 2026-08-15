@@ -6,11 +6,13 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
+  BookingRepository,
   ClassSessionRepository,
   createDynamoDbAdapter,
   ReservationRepository,
   SchedulingCatalogRepository,
   AuditLogRepository,
+  primaryKeys,
 } from "./index";
 
 const enabled = process.env.DYNAMODB_LOCAL_INTEGRATION === "1";
@@ -28,6 +30,7 @@ const sessions = new ClassSessionRepository(adapter, tableName);
 const reservations = new ReservationRepository(adapter, tableName);
 const catalog = new SchedulingCatalogRepository(adapter, tableName);
 const audits = new AuditLogRepository(adapter, tableName);
+const bookings = new BookingRepository(adapter, tableName);
 
 const firstClass = {
   auditId: "audit-class-001",
@@ -208,6 +211,101 @@ describe.skipIf(!enabled)("scheduling repositories with DynamoDB Local", () => {
     });
     await expect(reservations.listByClass(session.id, { consistentRead: true }))
       .resolves.toMatchObject({ reservations: [expect.any(Object)] });
+  });
+
+  it("books atomically with eligibility, capacity, duplicate protection and durable replay", async () => {
+    const session = await sessions.create({
+      ...firstClass,
+      auditId: "audit-class-booking-001",
+      capacity: 1,
+      classDate: "2026-08-14",
+      classId: "class-booking-001",
+      endsAt: "2026-08-14T23:00:00Z",
+      startsAt: "2026-08-14T22:00:00Z",
+    });
+    const todayEpochDay = Math.floor(Date.parse("2026-08-08T00:00:00Z") / 86_400_000);
+    for (const studentId of ["booking-student-001", "booking-student-002"]) {
+      await adapter.put({
+        Item: {
+          ...primaryKeys.userProfile(studentId),
+          createdAt: "2026-08-08T10:00:00Z",
+          entityType: "UserProfile",
+          roles: ["STUDENT"],
+          schemaVersion: 1,
+          status: "ACTIVE",
+          updatedAt: "2026-08-08T10:00:00Z",
+          userId: studentId,
+        },
+        TableName: tableName,
+      });
+      await adapter.put({
+        Item: {
+          ...primaryKeys.activeMembership(studentId),
+          createdAt: "2026-08-01T10:00:00Z",
+          endEpochDay: todayEpochDay + 30,
+          entityType: "ActiveMembershipPointer",
+          membershipId: `membership-${studentId}`,
+          schemaVersion: 1,
+          startEpochDay: todayEpochDay - 7,
+          status: "ACTIVE",
+          updatedAt: "2026-08-01T10:00:00Z",
+          userId: studentId,
+        },
+        TableName: tableName,
+      });
+    }
+    const inputs = ["booking-student-001", "booking-student-002"].map((studentId) => ({
+      classId: session.id,
+      createdAt: "2026-08-08T16:00:00Z",
+      requestKey: `booking-request-${studentId}`,
+      reservationId: `reservation-${studentId}`,
+      studentId,
+      todayEpochDay,
+    }));
+    const attempts = await Promise.allSettled(inputs.map((input) => bookings.reserve(input)));
+    const winners = attempts.flatMap((attempt, index) =>
+      attempt.status === "fulfilled" ? [{ index, result: attempt.value }] : []
+    );
+    expect(winners).toHaveLength(1);
+    expect(attempts.filter(({ status }) => status === "rejected")).toHaveLength(1);
+    const winner = winners[0];
+    if (winner === undefined) throw new Error("Debe existir una reserva ganadora.");
+    await expect(bookings.reserve(inputs[winner.index]!)).resolves.toMatchObject({
+      disposition: "REPLAYED",
+      reservation: { status: "CONFIRMED", studentId: inputs[winner.index]!.studentId },
+    });
+    await expect(sessions.getById(session.id)).resolves.toMatchObject({ confirmedCount: 1, version: 2 });
+    await expect(reservations.listByClass(session.id, { consistentRead: true }))
+      .resolves.toMatchObject({ reservations: [expect.objectContaining({ status: "CONFIRMED" })] });
+    await expect(bookings.reserve({ ...inputs[winner.index]!, requestKey: "booking-request-duplicate" }))
+      .rejects.toMatchObject({ code: "BOOKING_CONFLICT" });
+    await expect(sessions.getById(session.id)).resolves.toMatchObject({ confirmedCount: 1 });
+  });
+
+  it("rolls back every booking effect when membership eligibility fails", async () => {
+    const session = await sessions.create({
+      ...firstClass,
+      auditId: "audit-class-ineligible-001",
+      capacity: 2,
+      classDate: "2026-08-15",
+      classId: "class-ineligible-001",
+      endsAt: "2026-08-15T23:00:00Z",
+      startsAt: "2026-08-15T22:00:00Z",
+    });
+    const studentId = "booking-student-expired";
+    const todayEpochDay = Math.floor(Date.parse("2026-08-08T00:00:00Z") / 86_400_000);
+    await adapter.put({
+      Item: { ...primaryKeys.userProfile(studentId), createdAt: "2026-08-01T10:00:00Z", entityType: "UserProfile", roles: ["STUDENT"], schemaVersion: 1, status: "ACTIVE", updatedAt: "2026-08-01T10:00:00Z", userId: studentId },
+      TableName: tableName,
+    });
+    await adapter.put({
+      Item: { ...primaryKeys.activeMembership(studentId), createdAt: "2026-07-01T10:00:00Z", endEpochDay: todayEpochDay - 1, entityType: "ActiveMembershipPointer", membershipId: "membership-expired", schemaVersion: 1, startEpochDay: todayEpochDay - 30, status: "ACTIVE", updatedAt: "2026-07-01T10:00:00Z", userId: studentId },
+      TableName: tableName,
+    });
+    await expect(bookings.reserve({ classId: session.id, createdAt: "2026-08-08T16:30:00Z", requestKey: "booking-request-expired", reservationId: "reservation-expired", studentId, todayEpochDay }))
+      .rejects.toMatchObject({ code: "BOOKING_CONFLICT" });
+    await expect(sessions.getById(session.id)).resolves.toMatchObject({ confirmedCount: 0, version: 1 });
+    await expect(reservations.getForStudent(session.id, studentId)).resolves.toBeUndefined();
   });
 
   it("blocks a cancelled session immediately and resumes idempotent reservation batches", async () => {

@@ -2,6 +2,7 @@ import type { DomainEntity } from "@gym-adr/domain";
 import type { EntityId } from "@gym-adr/shared";
 
 export * from "./base-repository";
+export * from "./booking-repository";
 export * from "./audit-log-repository";
 export * from "./class-session-repository";
 export * from "./scheduling-catalog-repository";

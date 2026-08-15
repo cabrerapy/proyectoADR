@@ -44,6 +44,11 @@ export interface IdempotencyResult {
   readonly result: JsonValue;
 }
 
+export type FindIdempotencyInput = Pick<
+  RecordIdempotencyInput,
+  "operation" | "payload" | "requestKey" | "subjectId"
+>;
+
 export type TransactionAction = NonNullable<
   TransactWriteCommandInput["TransactItems"]
 >[number];
@@ -276,6 +281,36 @@ export class IdempotencyRepository {
     tableName: string,
   ) {
     this.tableName = assertTableName(tableName);
+  }
+
+  async findReplay(
+    input: FindIdempotencyInput,
+  ): Promise<IdempotencyResult | undefined> {
+    const key = idempotencyKey(
+      input.operation,
+      input.subjectId,
+      input.requestKey,
+    );
+    const payloadHash = hashIdempotencyPayload(input.payload);
+    let existing: DynamoDbItem | undefined;
+    try {
+      existing = (await this.document.get({
+        ConsistentRead: true,
+        Key: key,
+        TableName: this.tableName,
+      })).Item;
+    } catch (error) {
+      throw mapDynamoDbError(error);
+    }
+    if (existing === undefined) return undefined;
+    const persisted = readItem(existing, key);
+    if (persisted.payloadHash !== payloadHash) {
+      throw new DynamoDbRepositoryError(
+        "IDEMPOTENCY_CONFLICT",
+        "La clave idempotente ya fue utilizada con una carga diferente.",
+      );
+    }
+    return { disposition: "REPLAYED", result: persisted.result };
   }
 
   async recordOrReplay(input: RecordIdempotencyInput): Promise<IdempotencyResult> {

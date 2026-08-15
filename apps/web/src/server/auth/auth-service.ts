@@ -18,6 +18,8 @@ import {
   type CreateClassSessionInput,
   type CancelClassSessionInput,
   type ClassCancellationBatch,
+  type BookingMutationResult,
+  type CreateBookingInput,
   type ClassSessionPage,
   type PropagateClassCancellationInput,
   type UpdateClassSessionInput,
@@ -164,6 +166,10 @@ export interface ClassSessionPort {
   update(input: UpdateClassSessionInput): Promise<ClassSession>;
 }
 
+export interface BookingPort {
+  reserve(input: CreateBookingInput): Promise<BookingMutationResult>;
+}
+
 export interface OnboardingProfile {
   readonly completed: boolean;
   readonly displayName: string;
@@ -250,6 +256,7 @@ export interface SchedulingCatalogViewPage {
 }
 
 export interface AuthServiceDependencies {
+  readonly bookings?: BookingPort;
   readonly clock?: () => Date;
   readonly config: AuthConfig;
   readonly catalog?: SchedulingCatalogPort;
@@ -1145,6 +1152,56 @@ export class AuthService {
     }
   }
 
+  async reserveOwnClass(
+    request: Request,
+    classId: string,
+  ): Promise<BookingMutationResult> {
+    this.assertSameOrigin(request);
+    const principal = await this.authenticate(request);
+    this.assertRateLimit(principalRateKey(principal.id, "booking-write"), 20);
+    const requestKey = request.headers.get("idempotency-key");
+    if (requestKey === null || !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u.test(requestKey)) {
+      throw new ApiError(422, apiErrorCodes.validationError, "La clave de idempotencia no es válida.");
+    }
+    try {
+      const scope = new AuthorizedRepositoryScope(principalFromProfile(principal));
+      return await scope.mutateOwn("RESERVATION_MANAGE_OWN", async (studentId) => {
+        const now = this.clock();
+        const membership = await this.membershipRepository().getActive(studentId);
+        if (membership === undefined || membershipStanding(membership, now) !== "CURRENT") {
+          throw new ApiError(403, apiErrorCodes.forbidden, "Necesitas una membresía activa y vigente para reservar.");
+        }
+        const today = localCalendarDate(now);
+        return this.bookingRepository().reserve({
+          classId,
+          createdAt: now.toISOString(),
+          requestKey,
+          reservationId: this.ids(),
+          studentId,
+          todayEpochDay: Math.floor(Date.parse(`${today}T00:00:00.000Z`) / 86_400_000),
+        });
+      });
+    } catch (error) {
+      this.rethrowAuthorization(error);
+      if (error instanceof ApiError) throw error;
+      if (error instanceof DynamoDbRepositoryError) {
+        if (error.code === "RESOURCE_NOT_FOUND") {
+          throw new ApiError(404, apiErrorCodes.notFound, "No se encontró la sesión.");
+        }
+        if (
+          error.code === "BOOKING_CONFLICT" ||
+          error.code === "IDEMPOTENCY_CONFLICT"
+        ) {
+          throw new ApiError(409, apiErrorCodes.conflict, "La clase ya no admite esta reserva o la solicitud está duplicada.");
+        }
+        if (error.code === "INVALID_INPUT") {
+          throw new ApiError(422, apiErrorCodes.validationError, "La solicitud de reserva no es válida.");
+        }
+      }
+      throw new ApiError(502, apiErrorCodes.internalError, "No fue posible confirmar la reserva.");
+    }
+  }
+
   async listAdminMemberships(
     request: Request,
     query: MembershipHistoryQuery,
@@ -1631,6 +1688,13 @@ export class AuthService {
   private classSessionRepository(): ClassSessionPort {
     if (this.dependencies.classSessions === undefined) throw new ApiError(500, apiErrorCodes.internalError, "El servicio de sesiones no está configurado.");
     return this.dependencies.classSessions;
+  }
+
+  private bookingRepository(): BookingPort {
+    if (this.dependencies.bookings === undefined) {
+      throw new ApiError(500, apiErrorCodes.internalError, "El servicio de reservas no está configurado.");
+    }
+    return this.dependencies.bookings;
   }
 
   private membershipRepository(): MembershipPort {
