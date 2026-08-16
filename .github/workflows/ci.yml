@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Quality and unit tests
+        run: npm run check
+      - name: Production dependency audit
+        run: npm audit --omit=dev --audit-level=high
+      - name: DynamoDB Local integration tests
+        run: npm run test:data-access:integration
+      - name: Web build
+        run: npm run build
+      - name: CDK development synthesis
+        run: npm run synth:development --workspace @gym-adr/infrastructure
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: End-to-end tests
+        run: npm run test:e2e --workspace @gym-adr/web

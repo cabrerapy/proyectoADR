@@ -28,6 +28,9 @@ test("exposes every public area from the accessible mobile menu", async ({ page 
 });
 
 test("renders all public routes and safe empty or provisional states", async ({ page }) => {
+  await page.route("**/api/v1/gallery?*", (route) =>
+    route.fulfill({ contentType: "application/json", json: { assets: [] } }),
+  );
   for (const route of publicRoutes) {
     const response = await page.goto(route.path);
     expect(response?.ok()).toBe(true);

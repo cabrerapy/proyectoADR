@@ -7,6 +7,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./testing": {
+      "types": "./src/testing/repository-fixtures.ts",
+      "default": "./src/testing/repository-fixtures.ts"
     }
   },
   "scripts": {

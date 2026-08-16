@@ -81,7 +81,8 @@ let testExitCode = 1;
 
 try {
   await waitForServer(server);
-  const playwright = run(process.execPath, [playwrightCli, "test"]);
+  const requestedTests = process.argv.slice(2);
+  const playwright = run(process.execPath, [playwrightCli, "test", ...requestedTests]);
   testExitCode = await waitForExit(playwright);
 } finally {
   await stopServer(server);

@@ -1,0 +1,43 @@
+name: Development deployment plan
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Motivo del plan de cambios
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: development-plan
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    environment: development
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Validate exact infrastructure contracts
+        run: npm test --workspace @gym-adr/infrastructure
+      - name: Synthesize development
+        run: npm run synth:development --workspace @gym-adr/infrastructure
+      - name: Acquire short-lived planning credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_DEVELOPMENT_PLAN_ROLE_ARN }}
+          role-session-name: gym-adr-development-plan
+      - name: Compare development without changes
+        working-directory: infrastructure
+        run: npx cdk diff -c environment=development --fail
