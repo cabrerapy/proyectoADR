@@ -17,6 +17,7 @@
     "check:boundaries": "node scripts/check-workspace-boundaries.mjs",
     "check:no-scan": "node scripts/check-no-scan.mjs",
     "check:access-patterns": "node --test scripts/access-pattern-catalog.test.mjs",
+    "check:development-readiness": "node --test scripts/development-readiness.test.mjs",
     "dynamodb:local:down": "node scripts/dynamodb-local/cli.mjs down",
     "dynamodb:local:smoke": "node scripts/dynamodb-local/cli.mjs smoke",
     "dynamodb:local:test": "node scripts/dynamodb-local/cli.mjs test",
