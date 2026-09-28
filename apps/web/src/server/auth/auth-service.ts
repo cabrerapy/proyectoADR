@@ -1448,7 +1448,7 @@ export class AuthService {
       return await scope.listOwn("RESERVATION_MANAGE_OWN", async (studentId) => {
         const cursor = decodeOwnReservationCursor(query.cursor, studentId);
         const [available, reservationPage] = await Promise.all([
-          this.classSessionRepository().listAvailable(query.from, query.to, { limitPerPartition: 100 }),
+          this.classSessionRepository().listAvailable(query.from, query.to, { limitPerPartition: 25 }),
           this.reservationRepository().listByStudent(studentId, {
             ...(cursor === undefined ? {} : { cursor }),
             limit: 20,
@@ -2023,11 +2023,15 @@ export class AuthService {
   logout(request: Request): Response {
     this.assertSameOrigin(request);
     this.assertRateLimit(requestRateKey(request, "logout"), 20);
-    const destination = new URL("/logout", this.dependencies.config.hostedUiBaseUrl);
-    destination.search = new URLSearchParams({
-      client_id: this.dependencies.config.clientId,
-      logout_uri: this.dependencies.config.appBaseUrl,
-    }).toString();
+    const destination = this.dependencies.config.environment === "local"
+      ? new URL("/", this.dependencies.config.appBaseUrl)
+      : new URL("/logout", this.dependencies.config.hostedUiBaseUrl);
+    if (this.dependencies.config.environment !== "local") {
+      destination.search = new URLSearchParams({
+        client_id: this.dependencies.config.clientId,
+        logout_uri: this.dependencies.config.appBaseUrl,
+      }).toString();
+    }
     const headers = new Headers({ location: destination.toString() });
     appendCookie(headers, serializeCookie(
       sessionCookieName(this.dependencies.config.environment),

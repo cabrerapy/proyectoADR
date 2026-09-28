@@ -7,8 +7,11 @@ const tracingRoot = process.env.OPEN_NEXT_MONOREPO_ROOT ??
 const publicCacheControl =
   "public, max-age=0, s-maxage=3600, stale-while-revalidate=86400";
 const privateCacheControl = "private, no-store, max-age=0";
+const localDevelopmentScripts = process.env.APP_ENVIRONMENT === "local"
+  ? " 'unsafe-eval'"
+  : "";
 const securityHeaders = [
-  { key: "Content-Security-Policy", value: "default-src 'self'; base-uri 'self'; connect-src 'self' https://*.amazoncognito.com; font-src 'self'; form-action 'self' https://*.amazoncognito.com; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; upgrade-insecure-requests" },
+  { key: "Content-Security-Policy", value: `default-src 'self'; base-uri 'self'; connect-src 'self' https://*.amazoncognito.com; font-src 'self'; form-action 'self' https://*.amazoncognito.com; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' 'unsafe-inline'${localDevelopmentScripts}; style-src 'self' 'unsafe-inline'; upgrade-insecure-requests` },
   { key: "Permissions-Policy", value: "camera=(), geolocation=(), microphone=(), payment=()" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   { key: "Strict-Transport-Security", value: "max-age=31536000; includeSubDomains" },
@@ -29,6 +32,7 @@ const publicRoutes = [
 ] as const;
 
 const nextConfig: NextConfig = {
+  agentRules: false,
   async headers() {
     return [
       { headers: [...securityHeaders], source: "/:path*" },

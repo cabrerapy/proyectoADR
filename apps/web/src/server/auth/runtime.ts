@@ -23,6 +23,7 @@ import {
 import { resolveAuthConfig } from "./auth-config";
 import { AuthService } from "./auth-service";
 import { CognitoTokenClient } from "./cognito-client";
+import { LocalTokenClient } from "./local-token-client";
 import { FixedWindowRateLimiter } from "./rate-limiter";
 import {
   LocalReceiptUploadSigner,
@@ -149,7 +150,9 @@ const createService = async (): Promise<AuthService> => {
     memberships: new MembershipRepository(adapter, tableName),
     payments: new PaymentRepository(adapter, tableName),
     plans: new MembershipPlanRepository(adapter, tableName),
-    tokens: new CognitoTokenClient(config),
+    tokens: config.environment === "local" && process.env.LOCAL_AUTH_ENABLED === "1"
+      ? new LocalTokenClient()
+      : new CognitoTokenClient(config),
     receipts,
     reservations: new ReservationRepository(adapter, tableName),
     settings: new GymSettingsRepository(adapter, tableName),

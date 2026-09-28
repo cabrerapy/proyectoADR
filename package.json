@@ -13,6 +13,7 @@
   ],
   "scripts": {
     "dev": "npm run dev --workspace @gym-adr/web",
+    "dev:local": "node scripts/local-environment/cli.mjs dev",
     "build": "npm run build --workspace @gym-adr/web",
     "check:boundaries": "node scripts/check-workspace-boundaries.mjs",
     "check:no-scan": "node scripts/check-no-scan.mjs",
@@ -24,6 +25,8 @@
     "dynamodb:local:up": "node scripts/dynamodb-local/cli.mjs up",
     "format:check": "node scripts/check-format.mjs",
     "lint": "npm run lint --workspace @gym-adr/web",
+    "local:reset": "node scripts/local-environment/cli.mjs reset",
+    "local:verify": "node scripts/local-environment/verify.mjs",
     "security:secrets": "node scripts/check-secrets.mjs",
     "synth": "npm run synth --workspace @gym-adr/infrastructure",
     "test:tooling": "node --test scripts/**/*.test.mjs",

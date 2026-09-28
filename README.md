@@ -4,7 +4,7 @@ Plataforma web responsive para un gimnasio de cross training en Limpio, Paraguay
 
 ## Estado
 
-Especificación DynamoDB auditada. La fundación del monorepo, Next.js, la infraestructura base con AWS CDK, la tabla única DynamoDB On-Demand y el adaptador AWS SDK v3 están implementados hasta `TASK-012`, incluido el build serverless real de OpenNext. No existen recursos AWS desplegados.
+El MVP está implementado y dispone de un entorno integral local con DynamoDB Local, fixtures y autenticación ficticia. La preparación de AWS development permanece separada y no existen recursos AWS desplegados.
 
 ## Decisiones base
 
@@ -32,6 +32,24 @@ npm run dynamodb:local:down
 
 `npm run dynamodb:local:test` ejecuta el ciclo completo de arranque, readiness, transacción y limpieza. El puerto predeterminado es `8000`; para una ejecución puntual puede cambiarse con `DYNAMODB_LOCAL_PORT`.
 
+## Entorno integral local
+
+Requisitos: Node.js 24, npm y Docker Desktop iniciado. No se necesitan credenciales AWS ni archivos `.env`.
+
+```text
+npm run dev:local
+```
+
+El comando levanta DynamoDB Local, crea la tabla única y sus dos GSIs, aplica fixtures idempotentes e inicia Next.js en `http://localhost:3000`. Abra `http://localhost:3000/local-login` para seleccionar un perfil ficticio.
+
+Para descartar todos los datos y volver a sembrar:
+
+```text
+npm run local:reset
+```
+
+La verificación vertical automatizada se ejecuta con `npm run local:verify`. Detalles, perfiles y matriz manual: `docs/runbooks/local-development.md`.
+
 ## Estructura prevista
 
 ```text
@@ -49,4 +67,4 @@ docs/                     Especificaciones, arquitectura y ADR
 
 ## Próximo paso
 
-Implementar `TASK-013`, primitivas persistentes de idempotencia, siempre una tarea por vez conforme a `AGENTS.md`.
+Completar las puertas manuales de AWS development descritas en el runbook de readiness antes de autorizar cualquier despliegue.

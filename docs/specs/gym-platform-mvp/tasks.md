@@ -66,6 +66,7 @@ Cada tarea indica objetivo, dependencias, módulos esperados, finalización/prue
 | TASK-054 | COMPLETADA | 2026-08-15 | CI de pull request/main usa instalación reproducible, calidad, audit de dependencias productivas, DynamoDB Local, build, síntesis development y E2E. Permisos globales limitados a lectura y sin deploy/bootstrap. La prueba estructural del workflow y `cdk synth` pasan. |
 | TASK-055 | COMPLETADA | 2026-08-15 | Workflow manual de planificación development preparado con OIDC, environment protegido, credenciales efímeras, contratos IaC, synth y `cdk diff`; no contiene deploy/bootstrap ni credenciales estáticas. Runbook separa rol de planificación y futura aprobación de despliegue. Prueba estructural e infraestructura pasan. |
 | TASK-056 | COMPLETADA | 2026-08-16 | Readiness development revisado sin acceso remoto: tabla aislada On-Demand con límite 500 RRU/WRU, budget USD 25, IdPs/SES/IAM y workflow OIDC verificados en IaC. El runbook registra costos cualitativos, rollback y puertas manuales pendientes (cuenta, región, bootstrap autorizado, OIDC, IdPs, SES, alertas, diff y aprobación), por lo que aún no autoriza desplegar. Pasan el control específico, las assertions de infraestructura y `cdk synth` development. |
+| TASK-060 | COMPLETADA | 2026-08-16 | Entorno vertical local implementado con `npm run dev:local`: inicia DynamoDB Local, crea la tabla única On-Demand con GSI1/GSI2, aplica fixtures reproducibles e idempotentes e inicia Next.js sin credenciales AWS. `npm run local:reset` recrea y resiembra; `/local-login` ofrece STUDENT/STAFF/ADMIN activos y STUDENT PENDING/SUSPENDED/INACTIVE. La sesión ficticia está cerrada por alias, solo se habilita en local y roles/estado se resuelven en backend desde DynamoDB. `npm run local:verify` pasó 14 comprobaciones verticales de visitante, alumno, staff y admin, incluida reserva/cancelación transaccional y denegaciones 401/403. Pasaron formato (323 archivos), secretos (329), límites, no-Scan, lint, typecheck estricto, 12 pruebas de tooling, 247 pruebas unitarias/workspace, build Next.js de 54 páginas, smoke transaccional DynamoDB Local, arranque limpio HTTP 200 y reset/reseed; la revisión visual confirmó STUDENT y ADMIN sin errores de consola tras el ajuste CSP exclusivo de local. No hubo dependencias nuevas, secretos, bootstrap, deploy ni recursos AWS. |
 
 ## Fase 1. Fundación del repositorio
 
@@ -225,6 +226,12 @@ Cada tarea indica objetivo, dependencias, módulos esperados, finalización/prue
 |---|---|---|---|---|---|
 | TASK-058 | Actualizar arquitectura, catálogo de claves y runbooks. | TASK-057 | README/docs | Enlaces, comandos y ejemplos validados por colaborador nuevo. | Todos |
 | TASK-059 | Cerrar trazabilidad MVP y readiness production. | TASK-058 | matriz/release notes | Cada REQ tiene evidencia/excepción; riesgos production abiertos. | Todos |
+
+## Fase 21. Entorno local integral
+
+| ID | Objetivo | Dependencias | Archivos/módulos | Finalización y pruebas | Requisitos |
+|---|---|---|---|---|---|
+| TASK-060 | Levantar el MVP completo localmente con un comando, autenticación ficticia y fixtures idempotentes. | TASK-053, TASK-056 | `scripts/local-environment`, auth local, runbook | `dev:local` prepara DynamoDB/GSIs/fixtures/web sin AWS; reset/reseed y matriz VISITOR/STUDENT/STAFF/ADMIN pasan. | Todos (ejecución local) |
 
 ## Criterio global
 
